@@ -1,0 +1,12 @@
+node_modules
+dist
+.env
+.env.local
+npm-debug.log*
+dev.out.log
+dev.err.log
+apps/api/data/*.sqlite
+apps/api/data/uploads/
+apps/api/data/exports/
+.DS_Store
+Thumbs.db
