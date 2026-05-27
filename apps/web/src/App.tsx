@@ -18,16 +18,19 @@ import {
   X
 } from "lucide-react";
 import {
-  createParentExport,
+  createPrintJob,
   createStudent,
+  deletePrintJob,
   createTask,
   deleteStudent,
   deleteTask,
+  deleteTaskFile,
   getDashboard,
+  updatePrintJob,
   updateTask,
   uploadTaskFile
 } from "./api";
-import type { CreateStudentInput, CreateTaskInput, DashboardData, Priority, Student, TaskStatus, TaskType } from "./types";
+import type { CreateStudentInput, CreateTaskInput, DashboardData, Priority, Student, Task, TaskFile, TaskStatus, TaskType } from "./types";
 
 const priorityLabels: Record<Priority, string> = {
   high: "高优先级",
@@ -41,6 +44,12 @@ const statusLabels: Record<TaskStatus, string> = {
   submitted: "已提交",
   reviewed: "已批改",
   completed: "已完成"
+};
+
+const printStatusLabels: Record<string, string> = {
+  pending: "待打印",
+  printed: "已打印",
+  cancelled: "已取消"
 };
 
 const typeLabels: Record<TaskType, string> = {
@@ -72,6 +81,169 @@ const emptyTaskForm: CreateTaskInput = {
 
 type PortalMode = "landing" | "teacher-login" | "teacher" | "student";
 
+function wrapCanvasText(context: CanvasRenderingContext2D, text: string, maxWidth: number) {
+  const lines: string[] = [];
+  let currentLine = "";
+
+  for (const char of text) {
+    const testLine = currentLine + char;
+    if (context.measureText(testLine).width > maxWidth && currentLine) {
+      lines.push(currentLine);
+      currentLine = char;
+    } else {
+      currentLine = testLine;
+    }
+  }
+
+  if (currentLine) lines.push(currentLine);
+  return lines;
+}
+
+function loadImage(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Image load failed"));
+    image.src = src;
+  });
+}
+
+function drawRoundRect(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number
+) {
+  context.beginPath();
+  context.moveTo(x + radius, y);
+  context.lineTo(x + width - radius, y);
+  context.quadraticCurveTo(x + width, y, x + width, y + radius);
+  context.lineTo(x + width, y + height - radius);
+  context.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+  context.lineTo(x + radius, y + height);
+  context.quadraticCurveTo(x, y + height, x, y + height - radius);
+  context.lineTo(x, y + radius);
+  context.quadraticCurveTo(x, y, x + radius, y);
+  context.closePath();
+}
+
+async function downloadParentFeedbackPng(input: {
+  task: Task;
+  student?: Student;
+  correctionImages: TaskFile[];
+}) {
+  const correctionImages = await Promise.all(input.correctionImages.map((file) => loadImage(file.url)));
+  const width = 900;
+  const padding = 64;
+  const contentWidth = width - padding * 2;
+  const imageMaxHeight = 720;
+  const imageLayouts = correctionImages.map((image) => {
+    const imageRatio = Math.min(contentWidth / image.naturalWidth, imageMaxHeight / image.naturalHeight);
+    return {
+      image,
+      width: Math.round(image.naturalWidth * imageRatio),
+      height: Math.round(image.naturalHeight * imageRatio)
+    };
+  });
+  const imageSectionHeight = imageLayouts.reduce((total, image) => total + image.height, 0) + Math.max(0, imageLayouts.length - 1) * 34;
+
+  const measuringCanvas = document.createElement("canvas");
+  const measuringContext = measuringCanvas.getContext("2d");
+  if (!measuringContext) throw new Error("Canvas is not available");
+
+  const comment = input.task.teacherComment || input.task.assistantNote || "老师暂未留下文字评语，请以批改图片为准。";
+  measuringContext.font = '600 25px "Microsoft YaHei UI", "PingFang SC", sans-serif';
+  const commentLines = wrapCanvasText(measuringContext, comment, contentWidth - 44);
+  const height = 930 + imageSectionHeight + commentLines.length * 36;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Canvas is not available");
+
+  const gradient = context.createLinearGradient(0, 0, width, height);
+  gradient.addColorStop(0, "#fff8e8");
+  gradient.addColorStop(0.52, "#edf6eb");
+  gradient.addColorStop(1, "#eadcc5");
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, width, height);
+
+  context.fillStyle = "rgba(15, 118, 94, 0.11)";
+  context.beginPath();
+  context.arc(124, 86, 190, 0, Math.PI * 2);
+  context.fill();
+  context.fillStyle = "rgba(214, 154, 45, 0.15)";
+  context.beginPath();
+  context.arc(760, 42, 215, 0, Math.PI * 2);
+  context.fill();
+
+  context.fillStyle = "#073f34";
+  context.font = "900 62px Arial, sans-serif";
+  context.fillText("QLEDA", padding, 112);
+  context.fillStyle = "#0f765e";
+  context.font = "800 17px Arial, sans-serif";
+  context.fillText("PARENT FEEDBACK", padding + 2, 150);
+
+  context.fillStyle = "#fffaf0";
+  drawRoundRect(context, 48, 190, 804, 202, 32);
+  context.fill();
+  context.fillStyle = "#17211d";
+  context.font = '900 32px "Microsoft YaHei UI", "PingFang SC", sans-serif';
+  context.fillText(input.student?.name ?? "学生", 86, 252);
+  context.fillStyle = "#69736c";
+  context.font = '700 22px "Microsoft YaHei UI", "PingFang SC", sans-serif';
+  wrapCanvasText(context, input.task.title, 720).slice(0, 2).forEach((line, index) => {
+    context.fillText(line, 86, 300 + index * 32);
+  });
+  context.fillStyle = "#0f765e";
+  context.font = '800 18px "Microsoft YaHei UI", "PingFang SC", sans-serif';
+  context.fillText(`截止日期 ${input.task.dueDate} · ${input.task.score ?? "暂无分数"}`, 86, 360);
+
+  const imageCardTop = 430;
+  context.fillStyle = "#fffaf0";
+  drawRoundRect(context, 48, imageCardTop, 804, imageSectionHeight + 122, 32);
+  context.fill();
+  context.fillStyle = "#073f34";
+  context.font = '900 27px "Microsoft YaHei UI", "PingFang SC", sans-serif';
+  context.fillText("批改后的作业", 86, imageCardTop + 54);
+  let nextImageY = imageCardTop + 82;
+  imageLayouts.forEach((layout) => {
+    const drawnImageX = 86 + Math.round((contentWidth - layout.width) / 2);
+    context.fillStyle = "#ffffff";
+    context.fillRect(drawnImageX, nextImageY, layout.width, layout.height);
+    context.drawImage(layout.image, drawnImageX, nextImageY, layout.width, layout.height);
+    nextImageY += layout.height + 34;
+  });
+
+  const commentCardTop = imageCardTop + imageSectionHeight + 168;
+  context.fillStyle = "#fffaf0";
+  drawRoundRect(context, 48, commentCardTop, 804, 116 + commentLines.length * 36, 32);
+  context.fill();
+  context.fillStyle = "#073f34";
+  context.font = '900 27px "Microsoft YaHei UI", "PingFang SC", sans-serif';
+  context.fillText("老师评语", 86, commentCardTop + 56);
+  context.fillStyle = "#17211d";
+  context.font = '600 25px "Microsoft YaHei UI", "PingFang SC", sans-serif';
+  commentLines.forEach((line, index) => {
+    context.fillText(line, 86, commentCardTop + 106 + index * 36);
+  });
+
+  context.fillStyle = "#69736c";
+  context.font = "600 16px Arial, sans-serif";
+  context.fillText("Generated by QLEDA Teaching Operations", 86, height - 54);
+
+  const link = document.createElement("a");
+  const safeStudentName = (input.student?.name ?? "student").replace(/[\\/:*?"<>|]+/g, "_");
+  link.href = canvas.toDataURL("image/png");
+  link.download = `${safeStudentName}-${input.task.title.slice(0, 24).replace(/[\\/:*?"<>|]+/g, "_")}-家长反馈.png`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
 function App() {
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [portalMode, setPortalMode] = useState<PortalMode>("landing");
@@ -90,8 +262,12 @@ function App() {
   const [taskForm, setTaskForm] = useState<CreateTaskInput>(emptyTaskForm);
   const [taskFormError, setTaskFormError] = useState("");
   const [isSavingTask, setIsSavingTask] = useState(false);
+  const [assignmentTaskId, setAssignmentTaskId] = useState<string | null>(null);
+  const [assignmentFile, setAssignmentFile] = useState<File | null>(null);
+  const [assignmentError, setAssignmentError] = useState("");
+  const [isSavingAssignment, setIsSavingAssignment] = useState(false);
   const [correctionTaskId, setCorrectionTaskId] = useState<string | null>(null);
-  const [correctionFile, setCorrectionFile] = useState<File | null>(null);
+  const [correctionFiles, setCorrectionFiles] = useState<File[]>([]);
   const [correctionNote, setCorrectionNote] = useState("");
   const [correctionError, setCorrectionError] = useState("");
   const [isSavingCorrection, setIsSavingCorrection] = useState(false);
@@ -101,6 +277,16 @@ function App() {
   const [deleteStudentId, setDeleteStudentId] = useState<string | null>(null);
   const [deleteStudentError, setDeleteStudentError] = useState("");
   const [isDeletingStudent, setIsDeletingStudent] = useState(false);
+  const [deletingFileId, setDeletingFileId] = useState<string | null>(null);
+  const [isPrintQueueOpen, setIsPrintQueueOpen] = useState(false);
+  const [printFile, setPrintFile] = useState<File | null>(null);
+  const [printRequester, setPrintRequester] = useState("");
+  const [printCopies, setPrintCopies] = useState(1);
+  const [printNote, setPrintNote] = useState("");
+  const [printError, setPrintError] = useState("");
+  const [isSavingPrintJob, setIsSavingPrintJob] = useState(false);
+  const [deletingPrintJobId, setDeletingPrintJobId] = useState<string | null>(null);
+  const [previewFile, setPreviewFile] = useState<TaskFile | { name: string; url: string; fileType: string } | null>(null);
 
   async function loadDashboard() {
     try {
@@ -132,22 +318,32 @@ function App() {
   }
 
   function locatePendingReviewTask() {
-    const task = dashboard?.tasks.find((item) => item.status === "submitted");
+    const tasksWithCorrection = new Set(
+      dashboard?.taskFiles
+        .filter((file) => file.uploaderRole === "assistant" && file.fileType.startsWith("image/"))
+        .map((file) => file.taskId)
+    );
+    const task = dashboard?.tasks.find((item) => item.status !== "completed" && !tasksWithCorrection.has(item.id));
     if (!task) return;
     locateTask(task.id, task.studentId);
   }
 
   async function handleExport(taskId: string) {
     setBusyTaskId(taskId);
-    const exportRecord = await createParentExport(taskId);
-    await loadDashboard();
-    const downloadLink = document.createElement("a");
-    downloadLink.href = exportRecord.imageUrl;
-    downloadLink.download = exportRecord.title;
-    document.body.appendChild(downloadLink);
-    downloadLink.click();
-    downloadLink.remove();
-    setBusyTaskId(null);
+    try {
+      const task = dashboard?.tasks.find((item) => item.id === taskId);
+      if (!task) throw new Error("Task not found");
+      const student = dashboard?.students.find((item) => item.id === task.studentId);
+      const correctionImages = dashboard?.taskFiles
+        .filter((file) => file.taskId === taskId && file.uploaderRole === "assistant" && file.fileType.startsWith("image/"))
+        .slice(-9);
+      if (!correctionImages?.length) throw new Error("No correction image");
+      await downloadParentFeedbackPng({ task, student, correctionImages });
+    } catch {
+      window.alert("导出失败：请先上传图片格式的批改后文件，并确认老师评语已填写。");
+    } finally {
+      setBusyTaskId(null);
+    }
   }
 
   async function handleCreateStudent(event: FormEvent<HTMLFormElement>) {
@@ -197,10 +393,46 @@ function App() {
     }
   }
 
+  async function handleUploadAssignment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!assignmentTaskId || !assignmentFile) {
+      setAssignmentError("请先选择要上传的作业文件。");
+      return;
+    }
+
+    const task = dashboard?.tasks.find((item) => item.id === assignmentTaskId);
+    setAssignmentError("");
+    setIsSavingAssignment(true);
+
+    try {
+      await uploadTaskFile(assignmentTaskId, {
+        file: assignmentFile,
+        uploaderId: task?.studentId ?? "student",
+        uploaderRole: "student"
+      });
+      await updateTask(assignmentTaskId, {
+        status: "submitted"
+      });
+      await loadDashboard();
+      if (task) locateTask(task.id, task.studentId);
+      setAssignmentTaskId(null);
+      setAssignmentFile(null);
+    } catch {
+      setAssignmentError("作业上传失败，请确认文件和后端服务正常。");
+    } finally {
+      setIsSavingAssignment(false);
+    }
+  }
+
   async function handleUploadCorrection(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!correctionTaskId || !correctionFile) {
-      setCorrectionError("请先选择批改后的作业文件。");
+    if (!correctionTaskId || correctionFiles.length === 0) {
+      setCorrectionError("请先选择批改后的作业照片。");
+      return;
+    }
+
+    if (correctionFiles.length > 9) {
+      setCorrectionError("一次最多只能上传 9 张批改照片。");
       return;
     }
 
@@ -209,19 +441,23 @@ function App() {
     setIsSavingCorrection(true);
 
     try {
-      await uploadTaskFile(correctionTaskId, {
-        file: correctionFile,
-        uploaderId: "u-assistant-chen",
-        uploaderRole: "assistant"
-      });
+      await Promise.all(
+        correctionFiles.map((file) =>
+          uploadTaskFile(correctionTaskId, {
+            file,
+            uploaderId: "u-assistant-chen",
+            uploaderRole: "assistant"
+          })
+        )
+      );
       await updateTask(correctionTaskId, {
         status: "reviewed",
-        assistantNote: correctionNote || "助教已上传批改结果。"
+        teacherComment: correctionNote
       });
       await loadDashboard();
       if (task) locateTask(task.id, task.studentId);
       setCorrectionTaskId(null);
-      setCorrectionFile(null);
+      setCorrectionFiles([]);
       setCorrectionNote("");
     } catch {
       setCorrectionError("批改上传失败，请确认文件和后端服务正常。");
@@ -267,6 +503,81 @@ function App() {
     }
   }
 
+  async function handleDeleteFile(fileId: string) {
+    if (!window.confirm("确认删除这个文件吗？删除后数据库记录也会同步移除。")) return;
+    setDeletingFileId(fileId);
+
+    try {
+      await deleteTaskFile(fileId);
+      await loadDashboard();
+    } catch {
+      window.alert("删除批改照片失败，请确认后端服务正常。");
+    } finally {
+      setDeletingFileId(null);
+    }
+  }
+
+  async function handleCreatePrintJob(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!printFile) {
+      setPrintError("请先选择需要打印的文件。");
+      return;
+    }
+
+    setPrintError("");
+    setIsSavingPrintJob(true);
+
+    try {
+      await createPrintJob({
+        file: printFile,
+        requester: printRequester,
+        copies: Number(printCopies),
+        note: printNote
+      });
+      await loadDashboard();
+      setPrintFile(null);
+      setPrintRequester("");
+      setPrintCopies(1);
+      setPrintNote("");
+    } catch {
+      setPrintError("打印文件上传失败，请检查文件、份数和后端服务。");
+    } finally {
+      setIsSavingPrintJob(false);
+    }
+  }
+
+  async function handleDeletePrintJob(jobId: string) {
+    if (!window.confirm("确认从打印队列中删除这个文件吗？")) return;
+    setDeletingPrintJobId(jobId);
+
+    try {
+      await deletePrintJob(jobId);
+      await loadDashboard();
+    } catch {
+      window.alert("删除打印文件失败，请确认后端服务正常。");
+    } finally {
+      setDeletingPrintJobId(null);
+    }
+  }
+
+  async function handleTaskStatusChange(taskId: string, status: TaskStatus) {
+    try {
+      await updateTask(taskId, { status });
+      await loadDashboard();
+    } catch {
+      window.alert("任务状态更新失败，请确认后端服务正常。");
+    }
+  }
+
+  async function handlePrintStatusChange(jobId: string, status: "pending" | "printed" | "cancelled") {
+    try {
+      await updatePrintJob(jobId, { status });
+      await loadDashboard();
+    } catch {
+      window.alert("打印状态更新失败，请确认后端服务正常。");
+    }
+  }
+
   function openTaskForm() {
     const fallbackStudentId = dashboard?.students[0]?.id ?? "";
     setTaskForm({
@@ -277,11 +588,28 @@ function App() {
     setIsTaskFormOpen(true);
   }
 
+  function openAssignmentForm(taskId: string) {
+    setAssignmentTaskId(taskId);
+    setAssignmentFile(null);
+    setAssignmentError("");
+  }
+
   function openCorrectionForm(taskId: string) {
     setCorrectionTaskId(taskId);
-    setCorrectionFile(null);
+    setCorrectionFiles([]);
     setCorrectionNote("");
     setCorrectionError("");
+  }
+
+  function handleCorrectionFilesChange(files: FileList | null) {
+    const selectedFiles = Array.from(files ?? []);
+    if (selectedFiles.length > 9) {
+      setCorrectionFiles([]);
+      setCorrectionError("一次最多只能上传 9 张批改照片，请重新选择。");
+      return;
+    }
+    setCorrectionError("");
+    setCorrectionFiles(selectedFiles);
   }
 
   function handleTeacherLogin(event: FormEvent<HTMLFormElement>) {
@@ -303,6 +631,8 @@ function App() {
       </main>
     );
   }
+
+  const correctionTask = correctionTaskId ? dashboard.tasks.find((task) => task.id === correctionTaskId) : undefined;
 
   if (portalMode === "landing") {
     return <LandingPortal onTeacher={() => setPortalMode("teacher-login")} onStudent={() => setPortalMode("student")} />;
@@ -326,12 +656,16 @@ function App() {
 
   if (portalMode === "student") {
     return (
-      <StudentPortal
-        dashboard={dashboard}
-        selectedStudentId={studentPortalId}
-        onStudentChange={setStudentPortalId}
-        onBack={() => setPortalMode("landing")}
-      />
+      <>
+        <StudentPortal
+          dashboard={dashboard}
+          selectedStudentId={studentPortalId}
+          onStudentChange={setStudentPortalId}
+          onPreview={setPreviewFile}
+          onBack={() => setPortalMode("landing")}
+        />
+        {previewFile && <FilePreviewModal file={previewFile} onClose={() => setPreviewFile(null)} />}
+      </>
     );
   }
 
@@ -339,8 +673,6 @@ function App() {
     selectedStudentId === "all"
       ? dashboard.tasks
       : dashboard.tasks.filter((task) => task.studentId === selectedStudentId);
-  const correctionTask = correctionTaskId ? dashboard.tasks.find((task) => task.id === correctionTaskId) : undefined;
-
   return (
     <main className="app-shell">
       <button
@@ -370,7 +702,7 @@ function App() {
         <div className="hero-panel">
           <Sparkles size={28} />
           <strong>今日重点</strong>
-          <span>{dashboard.summary.pendingReview} 个任务等待批改，已上传 {dashboard.taskFiles.length} 个任务文件。</span>
+          <span>{dashboard.summary.pendingReview} 个任务等待批改，{dashboard.summary.pendingPrintJobs} 个文件在打印队列中。</span>
         </div>
       </section>
 
@@ -393,7 +725,14 @@ function App() {
           helper="跳转到对应学生任务"
           onClick={locatePendingReviewTask}
         />
-        <Metric icon={<Camera />} label="已上传文件" value={dashboard.taskFiles.length} helper="包含作业和批改文件" />
+        <Metric
+          icon={<Camera />}
+          label="需要打印的文件队列"
+          value={dashboard.summary.pendingPrintJobs}
+          helper="上传文件并备注份数/姓名或门牌号"
+          onClick={() => setIsPrintQueueOpen(true)}
+          tone="print"
+        />
       </section>
 
       <section className="workspace">
@@ -477,25 +816,30 @@ function App() {
                       <span>截止 {task.dueDate}</span>
                       {task.score && <span>{task.score}</span>}
                     </div>
-                    {task.teacherComment && <blockquote>{task.teacherComment}</blockquote>}
-                    {task.assistantNote && <blockquote>{task.assistantNote}</blockquote>}
+                    <label className="inline-status-control">
+                      任务状态
+                      <select value={task.status} onChange={(event) => void handleTaskStatusChange(task.id, event.target.value as TaskStatus)}>
+                        {Object.entries(statusLabels).map(([value, label]) => (
+                          <option key={value} value={value}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <TeacherNoteEditor task={task} onSave={loadDashboard} />
                   </div>
 
                   <div className="task-actions">
-                    <div className="file-stack">
-                      {files.length ? (
-                        files.map((file) => (
-                          <a key={file.id} href={file.url} target="_blank" rel="noreferrer">
-                            {file.fileType.startsWith("image/") && (
-                              <img className="file-preview" src={file.url} alt={file.name} />
-                            )}
-                            <span>{file.name}</span>
-                          </a>
-                        ))
-                      ) : (
-                        <span>暂无附件</span>
-                      )}
-                    </div>
+                    <TaskFileGallery
+                      files={files}
+                      deletingFileId={deletingFileId}
+                      onDeleteFile={(fileId) => void handleDeleteFile(fileId)}
+                      onPreview={setPreviewFile}
+                    />
+                    <button onClick={() => openAssignmentForm(task.id)} disabled={busyTaskId === task.id}>
+                      <UploadCloud size={16} />
+                      上传作业
+                    </button>
                     <button onClick={() => openCorrectionForm(task.id)} disabled={busyTaskId === task.id}>
                       <Camera size={16} />
                       上传批改
@@ -518,6 +862,31 @@ function App() {
         <FlowCard icon={<CheckCircle2 />} title="任务状态流转" text="提交后等待批改，上传批改后自动进入已批改状态。" />
         <FlowCard icon={<ImageDown />} title="家长反馈长图" text="后续可把批改图片、评语和下一步建议合成 PNG/JPG。" />
       </section>
+
+      <section className="audit-panel">
+        <div className="section-heading">
+          <span>后台操作记录</span>
+          <ShieldCheck size={18} />
+        </div>
+        <div className="audit-list">
+          {dashboard.auditLogs.length ? (
+            dashboard.auditLogs.slice(0, 12).map((log) => (
+              <article key={log.id} className="audit-item">
+                <strong>{log.detail}</strong>
+                <span>
+                  {log.actor} · {new Date(log.createdAt).toLocaleString()}
+                </span>
+              </article>
+            ))
+          ) : (
+            <p className="muted-copy">暂无操作记录。</p>
+          )}
+        </div>
+      </section>
+
+      {previewFile && (
+        <FilePreviewModal file={previewFile} onClose={() => setPreviewFile(null)} />
+      )}
 
       {isStudentFormOpen && (
         <div className="modal-backdrop" role="presentation">
@@ -687,6 +1056,140 @@ function App() {
         </div>
       )}
 
+      {isPrintQueueOpen && (
+        <div className="modal-backdrop" role="presentation">
+          <div className="student-form print-queue-modal">
+            <div className="form-header">
+              <div>
+                <p className="eyebrow">Print Queue</p>
+                <h2>需要打印的文件队列</h2>
+              </div>
+              <button type="button" className="icon-button" onClick={() => setIsPrintQueueOpen(false)}>
+                <X size={18} />
+              </button>
+            </div>
+
+            <form className="print-job-form" onSubmit={(event) => void handleCreatePrintJob(event)}>
+              <label>
+                打印文件
+                <input
+                  required
+                  type="file"
+                  accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.ppt,.pptx"
+                  onChange={(event) => setPrintFile(event.target.files?.[0] ?? null)}
+                />
+              </label>
+              <label>
+                姓名 / 教室门牌号
+                <input
+                  required
+                  value={printRequester}
+                  onChange={(event) => setPrintRequester(event.target.value)}
+                  placeholder="例如：Anna / A203"
+                />
+              </label>
+              <label>
+                打印份数
+                <input
+                  required
+                  min="1"
+                  max="200"
+                  type="number"
+                  value={printCopies}
+                  onChange={(event) => setPrintCopies(Number(event.target.value))}
+                />
+              </label>
+              <label>
+                打印备注
+                <textarea
+                  value={printNote}
+                  onChange={(event) => setPrintNote(event.target.value)}
+                  placeholder="例如：双面打印 / 课前送到 301 / 彩印"
+                />
+              </label>
+
+              {printError && <p className="form-error">{printError}</p>}
+
+              <button className="submit-button" type="submit" disabled={isSavingPrintJob}>
+                {isSavingPrintJob ? "加入队列中..." : "加入打印队列"}
+              </button>
+            </form>
+
+            <div className="print-job-list">
+              <strong>当前待打印</strong>
+              {dashboard.printJobs.length ? (
+                dashboard.printJobs.map((job) => (
+                  <div key={job.id} className="print-job-row">
+                    <button
+                      type="button"
+                      className="delete-print-job-button"
+                      onClick={() => void handleDeletePrintJob(job.id)}
+                      disabled={deletingPrintJobId === job.id}
+                      aria-label={`删除打印文件 ${job.fileName}`}
+                    >
+                      <X size={13} />
+                    </button>
+                    <div className="print-job-item">
+                      <span>{job.fileName}</span>
+                      <em>{job.requester}</em>
+                      <b>{job.copies} 份</b>
+                      <select
+                        value={job.status}
+                        onChange={(event) => void handlePrintStatusChange(job.id, event.target.value as "pending" | "printed" | "cancelled")}
+                      >
+                        {Object.entries(printStatusLabels).map(([value, label]) => (
+                          <option key={value} value={value}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
+                      <button type="button" className="preview-print-button" onClick={() => setPreviewFile({ name: job.fileName, url: job.fileUrl, fileType: job.fileType })}>
+                        预览
+                      </button>
+                      {job.note && <small>{job.note}</small>}
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <p className="muted-copy">当前没有待打印文件。</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {assignmentTaskId && (
+        <div className="modal-backdrop" role="presentation">
+          <form className="student-form" onSubmit={(event) => void handleUploadAssignment(event)}>
+            <div className="form-header">
+              <div>
+                <p className="eyebrow">Assignment Upload</p>
+                <h2>上传作业文件</h2>
+              </div>
+              <button type="button" className="icon-button" onClick={() => setAssignmentTaskId(null)}>
+                <X size={18} />
+              </button>
+            </div>
+
+            <label>
+              作业文件
+              <input
+                required
+                type="file"
+                accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.mp3,.mp4"
+                onChange={(event) => setAssignmentFile(event.target.files?.[0] ?? null)}
+              />
+            </label>
+
+            {assignmentError && <p className="form-error">{assignmentError}</p>}
+
+            <button className="submit-button" type="submit" disabled={isSavingAssignment}>
+              {isSavingAssignment ? "上传中..." : "上传并标记为已提交"}
+            </button>
+          </form>
+        </div>
+      )}
+
       {correctionTask && (
         <div className="modal-backdrop" role="presentation">
           <form className="student-form" onSubmit={(event) => void handleUploadCorrection(event)}>
@@ -705,11 +1208,13 @@ function App() {
               批改文件
               <input
                 required
+                multiple
                 type="file"
-                accept=".pdf,.doc,.docx,.png,.jpg,.jpeg"
-                onChange={(event) => setCorrectionFile(event.target.files?.[0] ?? null)}
+                accept=".png,.jpg,.jpeg,image/png,image/jpeg"
+                onChange={(event) => handleCorrectionFilesChange(event.target.files)}
               />
             </label>
+            {correctionFiles.length > 0 && <p className="form-context">已选择 {correctionFiles.length} 张批改照片</p>}
             <label>
               批改备注
               <textarea
@@ -887,11 +1392,13 @@ function StudentPortal({
   dashboard,
   selectedStudentId,
   onStudentChange,
+  onPreview,
   onBack
 }: {
   dashboard: DashboardData;
   selectedStudentId: string;
   onStudentChange: (studentId: string) => void;
+  onPreview: (file: TaskFile) => void;
   onBack: () => void;
 }) {
   const selectedStudent = dashboard.students.find((student) => student.id === selectedStudentId) ?? dashboard.students[0];
@@ -983,25 +1490,16 @@ function StudentPortal({
                       <span>截止 {task.dueDate}</span>
                       {task.score && <span>{task.score}</span>}
                     </div>
-                    {task.teacherComment && <blockquote>{task.teacherComment}</blockquote>}
-                    {task.assistantNote && <blockquote>{task.assistantNote}</blockquote>}
+                    {task.teacherComment && (
+                      <blockquote>
+                        <strong>老师备注</strong>
+                        <span>{task.teacherComment}</span>
+                      </blockquote>
+                    )}
                   </div>
 
                   <div className="task-actions read-only-files">
-                    <div className="file-stack">
-                      {files.length ? (
-                        files.map((file) => (
-                          <a key={file.id} href={file.url} target="_blank" rel="noreferrer">
-                            {file.fileType.startsWith("image/") && (
-                              <img className="file-preview" src={file.url} alt={file.name} />
-                            )}
-                            <span>{file.name}</span>
-                          </a>
-                        ))
-                      ) : (
-                        <span>暂无附件</span>
-                      )}
-                    </div>
+                    <TaskFileGallery files={files} readOnly onPreview={onPreview} />
                   </div>
                 </article>
               );
@@ -1013,22 +1511,60 @@ function StudentPortal({
   );
 }
 
+function FilePreviewModal({
+  file,
+  onClose
+}: {
+  file: TaskFile | { name: string; url: string; fileType: string };
+  onClose: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div className="file-preview-modal">
+        <div className="form-header">
+          <div>
+            <p className="eyebrow">File Preview</p>
+            <h2>{file.name}</h2>
+          </div>
+          <button type="button" className="icon-button" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+        {file.fileType.startsWith("image/") ? (
+          <img src={file.url} alt={file.name} />
+        ) : file.fileType === "application/pdf" ? (
+          <iframe title={file.name} src={file.url} />
+        ) : (
+          <div className="preview-fallback">
+            <p>当前文件类型不能直接内嵌预览，可以点击下方按钮打开或下载。</p>
+            <a href={file.url} target="_blank" rel="noreferrer">
+              打开文件
+            </a>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Metric({
   icon,
   label,
   value,
   helper,
-  onClick
+  onClick,
+  tone
 }: {
   icon: React.ReactNode;
   label: string;
   value: number;
   helper?: string;
   onClick?: () => void;
+  tone?: "print";
 }) {
   const Element = onClick ? "button" : "article";
   return (
-    <Element className="metric-card" onClick={onClick}>
+    <Element className={tone ? `metric-card ${tone}` : "metric-card"} onClick={onClick}>
       <div>{icon}</div>
       <span>{label}</span>
       <strong>{value}</strong>
@@ -1064,6 +1600,39 @@ function StudentCard({
   );
 }
 
+function TeacherNoteEditor({ task, onSave }: { task: Task; onSave: () => Promise<void> }) {
+  const [note, setNote] = useState(task.teacherComment ?? "");
+  const [isSaving, setIsSaving] = useState(false);
+
+  useEffect(() => {
+    setNote(task.teacherComment ?? "");
+  }, [task.id, task.teacherComment]);
+
+  async function handleSave() {
+    setIsSaving(true);
+    try {
+      await updateTask(task.id, { teacherComment: note });
+      await onSave();
+    } catch {
+      window.alert("老师备注保存失败，请确认后端服务正常。");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <div className="teacher-note-editor">
+      <label>
+        老师备注
+        <textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="在这里添加给学生或家长看的备注..." />
+      </label>
+      <button type="button" onClick={() => void handleSave()} disabled={isSaving}>
+        {isSaving ? "保存中..." : "保存备注"}
+      </button>
+    </div>
+  );
+}
+
 function FlowCard({ icon, title, text }: { icon: React.ReactNode; title: string; text: string }) {
   return (
     <article className="flow-card">
@@ -1071,6 +1640,110 @@ function FlowCard({ icon, title, text }: { icon: React.ReactNode; title: string;
       <h3>{title}</h3>
       <p>{text}</p>
     </article>
+  );
+}
+
+function TaskFileGallery({
+  files,
+  readOnly = false,
+  deletingFileId,
+  onDeleteFile,
+  onPreview
+}: {
+  files: TaskFile[];
+  readOnly?: boolean;
+  deletingFileId?: string | null;
+  onDeleteFile?: (fileId: string) => void;
+  onPreview?: (file: TaskFile) => void;
+}) {
+  const correctionFiles = files.filter((file) => file.uploaderRole === "assistant" && file.fileType.startsWith("image/"));
+  const assignmentFiles = files.filter((file) => !correctionFiles.some((correction) => correction.id === file.id));
+
+  return (
+    <div className="file-sections">
+      <FileSection
+        title="作业 / 附件"
+        files={assignmentFiles}
+        emptyText={readOnly ? "暂未上传作业" : "暂无作业文件"}
+        deletingFileId={deletingFileId}
+        onDelete={readOnly ? undefined : onDeleteFile}
+        onPreview={onPreview}
+      />
+      <FileSection
+        title="批改照片"
+        files={correctionFiles}
+        emptyText={readOnly ? "暂未上传批改" : "暂无批改照片"}
+        deletingFileId={deletingFileId}
+        onDelete={readOnly ? undefined : onDeleteFile}
+        onPreview={onPreview}
+      />
+    </div>
+  );
+}
+
+function FileSection({
+  title,
+  files,
+  emptyText,
+  deletingFileId,
+  onDelete,
+  onPreview
+}: {
+  title: string;
+  files: TaskFile[];
+  emptyText: string;
+  deletingFileId?: string | null;
+  onDelete?: (fileId: string) => void;
+  onPreview?: (file: TaskFile) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const previewFile = files.find((file) => file.fileType.startsWith("image/")) ?? files[0];
+  const imageCount = files.filter((file) => file.fileType.startsWith("image/")).length;
+  const bundleLabel = imageCount === files.length ? `${files.length} 张照片` : `${files.length} 个文件`;
+
+  return (
+    <div className="file-section">
+      <strong>{title}</strong>
+      <div className="file-stack">
+        {files.length ? (
+          <>
+            <button type="button" className="file-bundle-button" onClick={() => setExpanded((current) => !current)}>
+              {previewFile?.fileType.startsWith("image/") && <img className="file-bundle-preview" src={previewFile.url} alt={previewFile.name} />}
+              <span>
+                <b>{title}</b>
+                <em>{bundleLabel}</em>
+              </span>
+              <small>{expanded ? "收起" : "查看"}</small>
+            </button>
+            {expanded && (
+              <div className="file-bundle-detail">
+                {files.map((file) => (
+                  <div key={file.id} className="file-chip-wrap">
+                    {onDelete && (
+                      <button
+                        type="button"
+                        className="delete-file-button"
+                        onClick={() => onDelete(file.id)}
+                        disabled={deletingFileId === file.id}
+                        aria-label={`删除批改照片 ${file.name}`}
+                      >
+                        <X size={13} />
+                      </button>
+                    )}
+                    <button type="button" className="file-preview-button" onClick={() => onPreview?.(file)}>
+                      {file.fileType.startsWith("image/") && <img className="file-preview" src={file.url} alt={file.name} />}
+                      <span>{file.name}</span>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        ) : (
+          <span>{emptyText}</span>
+        )}
+      </div>
+    </div>
   );
 }
 

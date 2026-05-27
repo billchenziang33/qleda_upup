@@ -48,8 +48,6 @@ function id(prefix: string) {
 
 function createSchema(db: Database) {
   db.run(`
-    DROP TABLE IF EXISTS print_jobs;
-
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -109,8 +107,33 @@ function createSchema(db: Database) {
       FOREIGN KEY (taskId) REFERENCES tasks(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS print_jobs (
+      id TEXT PRIMARY KEY,
+      requester TEXT NOT NULL,
+      copies INTEGER NOT NULL DEFAULT 1,
+      note TEXT NOT NULL DEFAULT '',
+      fileName TEXT NOT NULL,
+      fileType TEXT NOT NULL,
+      fileUrl TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id TEXT PRIMARY KEY,
+      actor TEXT NOT NULL,
+      action TEXT NOT NULL,
+      entityType TEXT NOT NULL,
+      entityId TEXT NOT NULL,
+      detail TEXT NOT NULL,
+      createdAt TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_tasks_student ON tasks(studentId);
     CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
+    CREATE INDEX IF NOT EXISTS idx_print_jobs_status ON print_jobs(status);
+    CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(createdAt);
   `);
 }
 

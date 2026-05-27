@@ -1,4 +1,4 @@
-import type { CreateStudentInput, CreateTaskInput, DashboardData, ParentExport, Student, Task, TaskFile, TaskStatus } from "./types";
+import type { CreateStudentInput, CreateTaskInput, DashboardData, ParentExport, PrintJob, Student, Task, TaskFile, TaskStatus } from "./types";
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -46,6 +46,13 @@ export function updateTask(taskId: string, input: { status?: TaskStatus; assista
   });
 }
 
+export function updatePrintJob(jobId: string, input: { status: "pending" | "printed" | "cancelled" }) {
+  return request<PrintJob>(`/api/print-jobs/${jobId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input)
+  });
+}
+
 export async function deleteTask(taskId: string) {
   const response = await fetch(`${apiBaseUrl}/api/tasks/${taskId}`, {
     method: "DELETE"
@@ -66,6 +73,16 @@ export async function deleteStudent(studentId: string) {
   }
 }
 
+export async function deleteTaskFile(fileId: string) {
+  const response = await fetch(`${apiBaseUrl}/api/task-files/${fileId}`, {
+    method: "DELETE"
+  });
+
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
+}
+
 export function uploadTaskFile(taskId: string, input: { file: File; uploaderId: string; uploaderRole: string }) {
   const formData = new FormData();
   formData.append("file", input.file);
@@ -76,6 +93,29 @@ export function uploadTaskFile(taskId: string, input: { file: File; uploaderId: 
     method: "POST",
     body: formData
   });
+}
+
+export function createPrintJob(input: { file: File; requester: string; copies: number; note: string }) {
+  const formData = new FormData();
+  formData.append("file", input.file);
+  formData.append("requester", input.requester);
+  formData.append("copies", String(input.copies));
+  formData.append("note", input.note);
+
+  return request<PrintJob>("/api/print-jobs", {
+    method: "POST",
+    body: formData
+  });
+}
+
+export async function deletePrintJob(jobId: string) {
+  const response = await fetch(`${apiBaseUrl}/api/print-jobs/${jobId}`, {
+    method: "DELETE"
+  });
+
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
 }
 
 export function createParentExport(taskId: string) {

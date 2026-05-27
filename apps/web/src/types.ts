@@ -64,14 +64,40 @@ export interface ParentExport {
   createdAt: string;
 }
 
+export interface PrintJob {
+  id: string;
+  requester: string;
+  copies: number;
+  note: string;
+  fileName: string;
+  fileType: string;
+  fileUrl: string;
+  status: "pending" | "printed" | "cancelled" | string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AuditLog {
+  id: string;
+  actor: string;
+  action: string;
+  entityType: string;
+  entityId: string;
+  detail: string;
+  createdAt: string;
+}
+
 export interface DashboardData {
   students: Student[];
   tasks: Task[];
   taskFiles: TaskFile[];
   parentExports: ParentExport[];
+  printJobs: PrintJob[];
+  auditLogs: AuditLog[];
   summary: {
     studentCount: number;
     activeTasks: number;
     pendingReview: number;
+    pendingPrintJobs: number;
   };
 }
