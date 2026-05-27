@@ -130,10 +130,19 @@ function createSchema(db: Database) {
       createdAt TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS chat_messages (
+      id TEXT PRIMARY KEY,
+      authorRole TEXT NOT NULL,
+      authorName TEXT NOT NULL,
+      message TEXT NOT NULL,
+      createdAt TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_tasks_student ON tasks(studentId);
     CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
     CREATE INDEX IF NOT EXISTS idx_print_jobs_status ON print_jobs(status);
     CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(createdAt);
+    CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages(createdAt);
   `);
 }
 

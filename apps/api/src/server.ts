@@ -74,6 +74,14 @@ interface AuditLogRow {
   createdAt: string;
 }
 
+interface ChatMessageRow {
+  id: string;
+  authorRole: "teacher" | "assistant";
+  authorName: string;
+  message: string;
+  createdAt: string;
+}
+
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 const port = Number(process.env.PORT ?? 4000);
@@ -122,6 +130,12 @@ const createPrintJobSchema = z.object({
 
 const updatePrintJobSchema = z.object({
   status: z.enum(["pending", "printed", "cancelled"])
+});
+
+const createChatMessageSchema = z.object({
+  authorRole: z.enum(["teacher", "assistant"]),
+  authorName: z.string().min(1).max(40),
+  message: z.string().trim().min(1).max(500)
 });
 
 const priorityRank: Record<Priority, number> = {
@@ -299,7 +313,7 @@ app.get("/health", (_req, res) => {
 
 app.get("/api/dashboard", async (_req, res, next) => {
   try {
-    const [users, students, tasks, taskFiles, parentExports, printJobs, auditLogs] = await Promise.all([
+    const [users, students, tasks, taskFiles, parentExports, printJobs, auditLogs, chatMessages] = await Promise.all([
       all("SELECT * FROM users ORDER BY createdAt ASC"),
       all<StudentRow>(
         'SELECT id, name, grade, targetScore, currentLevel, "group" AS "group", teacherId, assistantId, createdAt, updatedAt FROM students ORDER BY createdAt ASC'
@@ -308,7 +322,8 @@ app.get("/api/dashboard", async (_req, res, next) => {
       all<TaskFileRow>("SELECT * FROM task_files ORDER BY createdAt ASC"),
       all("SELECT * FROM parent_exports ORDER BY createdAt DESC"),
       all<PrintJobRow>("SELECT * FROM print_jobs ORDER BY createdAt DESC"),
-      all<AuditLogRow>("SELECT * FROM audit_logs ORDER BY createdAt DESC LIMIT 80")
+      all<AuditLogRow>("SELECT * FROM audit_logs ORDER BY createdAt DESC LIMIT 80"),
+      all<ChatMessageRow>("SELECT * FROM chat_messages ORDER BY createdAt DESC LIMIT 60")
     ]);
     const tasksWithCorrection = new Set(
       taskFiles
@@ -325,6 +340,7 @@ app.get("/api/dashboard", async (_req, res, next) => {
       parentExports,
       printJobs: printJobs.map(mapPrintJob),
       auditLogs,
+      chatMessages: chatMessages.reverse(),
       summary: {
         studentCount: students.length,
         activeTasks: tasks.filter((task) => task.status !== "completed").length,
@@ -332,6 +348,55 @@ app.get("/api/dashboard", async (_req, res, next) => {
         pendingPrintJobs: printJobs.filter((job) => job.status === "pending").length
       }
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/chat-messages", async (req, res, next) => {
+  try {
+    const payload = createChatMessageSchema.parse(req.body);
+    const id = createId("msg");
+    const timestamp = now();
+
+    await run(
+      "INSERT INTO chat_messages (id, authorRole, authorName, message, createdAt) VALUES (?, ?, ?, ?, ?)",
+      [id, payload.authorRole, payload.authorName, payload.message, timestamp]
+    );
+
+    await writeAuditLog({
+      actor: payload.authorRole === "teacher" ? "u-teacher-lin" : "u-assistant-chen",
+      action: "create",
+      entityType: "chat_message",
+      entityId: id,
+      detail: `${payload.authorName} 发送了一条沟通消息。`
+    });
+
+    const message = await get<ChatMessageRow>("SELECT * FROM chat_messages WHERE id = ?", [id]);
+    res.status(201).json(message);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/chat-messages/:messageId", async (req, res, next) => {
+  try {
+    const message = await get<ChatMessageRow>("SELECT * FROM chat_messages WHERE id = ?", [req.params.messageId]);
+    if (!message) {
+      res.status(404).json({ error: "Message not found" });
+      return;
+    }
+
+    await run("DELETE FROM chat_messages WHERE id = ?", [req.params.messageId]);
+    await writeAuditLog({
+      actor: message.authorRole === "teacher" ? "u-teacher-lin" : "u-assistant-chen",
+      action: "delete",
+      entityType: "chat_message",
+      entityId: message.id,
+      detail: `${message.authorName} 删除了一条沟通消息。`
+    });
+
+    res.status(204).end();
   } catch (error) {
     next(error);
   }

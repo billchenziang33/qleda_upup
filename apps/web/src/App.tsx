@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   BookOpenCheck,
@@ -9,7 +9,9 @@ import {
   ImageDown,
   Loader2,
   LockKeyhole,
+  MessageCircle,
   Plus,
+  Send,
   ShieldCheck,
   Sparkles,
   UploadCloud,
@@ -18,8 +20,10 @@ import {
   X
 } from "lucide-react";
 import {
+  createChatMessage,
   createPrintJob,
   createStudent,
+  deleteChatMessage,
   deletePrintJob,
   createTask,
   deleteStudent,
@@ -30,7 +34,7 @@ import {
   updateTask,
   uploadTaskFile
 } from "./api";
-import type { CreateStudentInput, CreateTaskInput, DashboardData, Priority, Student, Task, TaskFile, TaskStatus, TaskType } from "./types";
+import type { ChatMessage, CreateStudentInput, CreateTaskInput, DashboardData, Priority, Student, Task, TaskFile, TaskStatus, TaskType } from "./types";
 
 const priorityLabels: Record<Priority, string> = {
   high: "高优先级",
@@ -69,6 +73,8 @@ const emptyStudentForm: CreateStudentInput = {
   group: ""
 };
 
+const ieltsScores = Array.from({ length: 19 }, (_, index) => (index * 0.5).toFixed(1).replace(".0", ""));
+
 const emptyTaskForm: CreateTaskInput = {
   studentId: "",
   title: "",
@@ -78,6 +84,15 @@ const emptyTaskForm: CreateTaskInput = {
   description: "",
   pinned: false
 };
+
+function formatDateTime(value: string) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(new Date(value));
+}
 
 type PortalMode = "landing" | "teacher-login" | "teacher" | "student";
 
@@ -256,6 +271,12 @@ function App() {
   const [error, setError] = useState("");
   const [isStudentFormOpen, setIsStudentFormOpen] = useState(false);
   const [studentForm, setStudentForm] = useState<CreateStudentInput>(emptyStudentForm);
+  const [studentScores, setStudentScores] = useState({
+    listening: "5.5",
+    reading: "5.5",
+    writing: "5.5",
+    speaking: "5.5"
+  });
   const [studentFormError, setStudentFormError] = useState("");
   const [isSavingStudent, setIsSavingStudent] = useState(false);
   const [isTaskFormOpen, setIsTaskFormOpen] = useState(false);
@@ -287,6 +308,12 @@ function App() {
   const [isSavingPrintJob, setIsSavingPrintJob] = useState(false);
   const [deletingPrintJobId, setDeletingPrintJobId] = useState<string | null>(null);
   const [previewFile, setPreviewFile] = useState<TaskFile | { name: string; url: string; fileType: string } | null>(null);
+  const [isAuditExpanded, setIsAuditExpanded] = useState(false);
+  const [chatRole, setChatRole] = useState<"teacher" | "assistant">("teacher");
+  const [chatText, setChatText] = useState("");
+  const [chatError, setChatError] = useState("");
+  const [isSendingChat, setIsSendingChat] = useState(false);
+  const [deletingChatMessageId, setDeletingChatMessageId] = useState<string | null>(null);
 
   async function loadDashboard() {
     try {
@@ -355,6 +382,7 @@ function App() {
       const student = await createStudent({
         ...studentForm,
         targetScore: Number(studentForm.targetScore),
+        currentLevel: `Listening ${studentScores.listening} / Reading ${studentScores.reading} / Writing ${studentScores.writing} / Speaking ${studentScores.speaking}`,
         teacherId: "u-teacher-lin",
         assistantId: "u-assistant-chen"
       });
@@ -362,6 +390,12 @@ function App() {
       setSelectedStudentId(student.id);
       setLocatedTaskId(null);
       setStudentForm(emptyStudentForm);
+      setStudentScores({
+        listening: "5.5",
+        reading: "5.5",
+        writing: "5.5",
+        speaking: "5.5"
+      });
       setIsStudentFormOpen(false);
     } catch {
       setStudentFormError("学生信息保存失败，请检查后端服务和表单内容。");
@@ -578,6 +612,46 @@ function App() {
     }
   }
 
+  async function handleSendChatMessage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const message = chatText.trim();
+    if (!message) {
+      setChatError("请输入沟通内容。");
+      return;
+    }
+
+    setChatError("");
+    setIsSendingChat(true);
+
+    try {
+      await createChatMessage({
+        authorRole: chatRole,
+        authorName: chatRole === "teacher" ? "老师" : "助教",
+        message
+      });
+      setChatText("");
+      await loadDashboard();
+    } catch {
+      setChatError("消息发送失败，请确认后端服务正常。");
+    } finally {
+      setIsSendingChat(false);
+    }
+  }
+
+  async function handleDeleteChatMessage(messageId: string) {
+    if (!window.confirm("确认删除这条沟通消息吗？删除后数据库记录也会同步移除。")) return;
+    setDeletingChatMessageId(messageId);
+
+    try {
+      await deleteChatMessage(messageId);
+      await loadDashboard();
+    } catch {
+      window.alert("删除沟通消息失败，请确认后端服务正常。");
+    } finally {
+      setDeletingChatMessageId(null);
+    }
+  }
+
   function openTaskForm() {
     const fallbackStudentId = dashboard?.students[0]?.id ?? "";
     setTaskForm({
@@ -673,6 +747,7 @@ function App() {
     selectedStudentId === "all"
       ? dashboard.tasks
       : dashboard.tasks.filter((task) => task.studentId === selectedStudentId);
+  const visibleAuditLogs = isAuditExpanded ? dashboard.auditLogs : dashboard.auditLogs.slice(0, 5);
   return (
     <main className="app-shell">
       <button
@@ -687,51 +762,67 @@ function App() {
         <ArrowLeft size={16} />
         返回主界面
       </button>
-      <section className="hero-card">
-        <div className="brand-title-wrap" aria-label="QLEDA">
-          <p className="brand-kicker">IELTS Teaching Operations</p>
-          <h1 className="brand-title">
-            <span>Q</span>
-            <span>L</span>
-            <span>E</span>
-            <span>D</span>
-            <span>A</span>
-          </h1>
-          <p className="brand-subtitle">Teaching task flow</p>
-        </div>
-        <div className="hero-panel">
-          <Sparkles size={28} />
-          <strong>今日重点</strong>
-          <span>{dashboard.summary.pendingReview} 个任务等待批改，{dashboard.summary.pendingPrintJobs} 个文件在打印队列中。</span>
-        </div>
-      </section>
+      <section className="top-dashboard">
+        <div className="top-dashboard-main">
+          <section className="hero-card">
+            <div className="brand-title-wrap" aria-label="QLEDA">
+              <p className="brand-kicker">IELTS Teaching Operations</p>
+              <h1 className="brand-title">
+                <span>Q</span>
+                <span>L</span>
+                <span>E</span>
+                <span>D</span>
+                <span>A</span>
+              </h1>
+              <p className="brand-subtitle">Teaching task flow</p>
+            </div>
+            <div className="hero-panel">
+              <Sparkles size={28} />
+              <strong>今日重点</strong>
+              <span>{dashboard.summary.pendingReview} 个任务等待批改，{dashboard.summary.pendingPrintJobs} 个文件在打印队列中。</span>
+            </div>
+          </section>
 
-      <section className="metric-grid">
-        <Metric icon={<GraduationCap />} label="学生数量" value={dashboard.summary.studentCount} />
-        <Metric
-          icon={<ClipboardList />}
-          label="进行中任务"
-          value={dashboard.summary.activeTasks}
-          helper="查看全部学生任务"
-          onClick={() => {
-            setSelectedStudentId("all");
-            setLocatedTaskId(null);
-          }}
-        />
-        <Metric
-          icon={<BookOpenCheck />}
-          label="待批改"
-          value={dashboard.summary.pendingReview}
-          helper="跳转到对应学生任务"
-          onClick={locatePendingReviewTask}
-        />
-        <Metric
-          icon={<Camera />}
-          label="需要打印的文件队列"
-          value={dashboard.summary.pendingPrintJobs}
-          helper="上传文件并备注份数/姓名或门牌号"
-          onClick={() => setIsPrintQueueOpen(true)}
-          tone="print"
+          <div className="metric-grid">
+            <Metric icon={<GraduationCap />} label="学生数量" value={dashboard.summary.studentCount} />
+            <Metric
+              icon={<ClipboardList />}
+              label="进行中任务"
+              value={dashboard.summary.activeTasks}
+              helper="查看全部学生任务"
+              onClick={() => {
+                setSelectedStudentId("all");
+                setLocatedTaskId(null);
+              }}
+            />
+            <Metric
+              icon={<BookOpenCheck />}
+              label="待批改"
+              value={dashboard.summary.pendingReview}
+              helper="跳转到对应学生任务"
+              onClick={locatePendingReviewTask}
+            />
+            <Metric
+              icon={<Camera />}
+              label="需要打印的文件队列"
+              value={dashboard.summary.pendingPrintJobs}
+              helper="上传文件并备注份数/姓名或门牌号"
+              onClick={() => setIsPrintQueueOpen(true)}
+              tone="print"
+            />
+          </div>
+        </div>
+        <CommunicationPanel
+          messages={dashboard.chatMessages}
+          role={chatRole}
+          text={chatText}
+          error={chatError}
+          isSending={isSendingChat}
+          onRoleChange={setChatRole}
+          onTextChange={setChatText}
+          onSubmit={handleSendChatMessage}
+          deletingMessageId={deletingChatMessageId}
+          onDeleteMessage={(messageId) => void handleDeleteChatMessage(messageId)}
         />
       </section>
 
@@ -753,7 +844,6 @@ function App() {
             }}
           >
             <strong>全部学生</strong>
-            <small>查看机构任务池</small>
           </button>
           {dashboard.students.map((student) => (
             <StudentCard
@@ -809,7 +899,7 @@ function App() {
                       {locatedTaskId === task.id && <span className="located-badge">已定位</span>}
                     </div>
                     <h3>{task.title}</h3>
-                    <p>{task.description}</p>
+                    {task.description && <p>{task.description}</p>}
                     <div className="task-meta">
                       <span>{student?.name}</span>
                       <span>{typeLabels[task.type]}</span>
@@ -870,7 +960,7 @@ function App() {
         </div>
         <div className="audit-list">
           {dashboard.auditLogs.length ? (
-            dashboard.auditLogs.slice(0, 12).map((log) => (
+            visibleAuditLogs.map((log) => (
               <article key={log.id} className="audit-item">
                 <strong>{log.detail}</strong>
                 <span>
@@ -882,6 +972,11 @@ function App() {
             <p className="muted-copy">暂无操作记录。</p>
           )}
         </div>
+        {dashboard.auditLogs.length > 5 && (
+          <button type="button" className="audit-toggle-button" onClick={() => setIsAuditExpanded((current) => !current)}>
+            {isAuditExpanded ? "收起记录" : `展开更多（${dashboard.auditLogs.length - 5} 条）`}
+          </button>
+        )}
       </section>
 
       {previewFile && (
@@ -933,12 +1028,28 @@ function App() {
             </label>
             <label>
               当前水平
-              <input
-                required
-                value={studentForm.currentLevel}
-                onChange={(event) => setStudentForm({ ...studentForm, currentLevel: event.target.value })}
-                placeholder="例如：阅读 5.5 / 写作 5.0"
-              />
+              <div className="score-grid">
+                <ScoreSelect
+                  label="听力"
+                  value={studentScores.listening}
+                  onChange={(value) => setStudentScores({ ...studentScores, listening: value })}
+                />
+                <ScoreSelect
+                  label="阅读"
+                  value={studentScores.reading}
+                  onChange={(value) => setStudentScores({ ...studentScores, reading: value })}
+                />
+                <ScoreSelect
+                  label="写作"
+                  value={studentScores.writing}
+                  onChange={(value) => setStudentScores({ ...studentScores, writing: value })}
+                />
+                <ScoreSelect
+                  label="口语"
+                  value={studentScores.speaking}
+                  onChange={(value) => setStudentScores({ ...studentScores, speaking: value })}
+                />
+              </div>
             </label>
             <label>
               分组
@@ -1032,7 +1143,6 @@ function App() {
             <label>
               任务说明
               <textarea
-                required
                 value={taskForm.description}
                 onChange={(event) => setTaskForm({ ...taskForm, description: event.target.value })}
                 placeholder="例如：先完成题目，再订正错题并标注定位句。"
@@ -1433,10 +1543,6 @@ function StudentPortal({
               onClick={() => onStudentChange(student.id)}
             >
               <strong>{student.name}</strong>
-              <small>
-                {student.group} / 目标 {student.targetScore}
-              </small>
-              <em>{student.currentLevel}</em>
             </button>
           ))}
         </aside>
@@ -1484,7 +1590,7 @@ function StudentPortal({
                       <span className="status">{statusLabels[task.status]}</span>
                     </div>
                     <h3>{task.title}</h3>
-                    <p>{task.description}</p>
+                    {task.description && <p>{task.description}</p>}
                     <div className="task-meta">
                       <span>{typeLabels[task.type]}</span>
                       <span>截止 {task.dueDate}</span>
@@ -1547,6 +1653,108 @@ function FilePreviewModal({
   );
 }
 
+function CommunicationPanel({
+  messages,
+  role,
+  text,
+  error,
+  isSending,
+  onRoleChange,
+  onTextChange,
+  onSubmit,
+  deletingMessageId,
+  onDeleteMessage
+}: {
+  messages: ChatMessage[];
+  role: "teacher" | "assistant";
+  text: string;
+  error: string;
+  isSending: boolean;
+  onRoleChange: (role: "teacher" | "assistant") => void;
+  onTextChange: (value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  deletingMessageId: string | null;
+  onDeleteMessage: (messageId: string) => void;
+}) {
+  const latestMessages = messages.slice(-6);
+  const threadRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const thread = threadRef.current;
+    if (!thread) return;
+    thread.scrollTop = thread.scrollHeight;
+  }, [latestMessages.length, latestMessages.at(-1)?.id]);
+
+  return (
+    <aside className="communication-card">
+      <div className="communication-heading">
+        <div>
+          <span>老师 / 助教沟通</span>
+          <strong>需求对话框</strong>
+        </div>
+        <MessageCircle size={22} />
+      </div>
+
+      <div className="chat-thread" ref={threadRef}>
+        {latestMessages.length ? (
+          latestMessages.map((message) => (
+            <article key={message.id} className={`chat-message ${message.authorRole}`}>
+              <button
+                type="button"
+                className="delete-chat-message-button"
+                onClick={() => onDeleteMessage(message.id)}
+                disabled={deletingMessageId === message.id}
+                aria-label="删除沟通消息"
+              >
+                {deletingMessageId === message.id ? <Loader2 className="spin" size={12} /> : <X size={12} />}
+              </button>
+              <div className="chat-message-meta">
+                <strong>{message.authorName}</strong>
+                <time>{formatDateTime(message.createdAt)}</time>
+              </div>
+              <p>{message.message}</p>
+            </article>
+          ))
+        ) : (
+          <p className="chat-empty">还没有沟通记录，可以在这里同步批改、打印或课程安排需求。</p>
+        )}
+      </div>
+
+      <form className="chat-form" onSubmit={onSubmit}>
+        <div className="chat-role-toggle" aria-label="选择发送身份">
+          <button type="button" className={role === "teacher" ? "active" : ""} onClick={() => onRoleChange("teacher")}>
+            老师
+          </button>
+          <button type="button" className={role === "assistant" ? "active" : ""} onClick={() => onRoleChange("assistant")}>
+            助教
+          </button>
+        </div>
+        <textarea value={text} onChange={(event) => onTextChange(event.target.value)} />
+        {error && <p className="form-error">{error}</p>}
+        <button className="chat-send-button" type="submit" disabled={isSending}>
+          {isSending ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
+          发送
+        </button>
+      </form>
+    </aside>
+  );
+}
+
+function ScoreSelect({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  return (
+    <label className="score-select">
+      <span>{label}</span>
+      <select value={value} onChange={(event) => onChange(event.target.value)}>
+        {ieltsScores.map((score) => (
+          <option key={score} value={score}>
+            {score}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 function Metric({
   icon,
   label,
@@ -1588,10 +1796,6 @@ function StudentCard({
     <div className={active ? "student-item-wrap active" : "student-item-wrap"}>
       <button className="student-item" onClick={onSelect}>
         <strong>{student.name}</strong>
-        <small>
-          {student.group} / 目标 {student.targetScore}
-        </small>
-        <em>{student.currentLevel}</em>
       </button>
       <button className="delete-student-button" onClick={onDelete} aria-label={`删除学生 ${student.name}`}>
         <X size={14} />

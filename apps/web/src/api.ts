@@ -1,4 +1,4 @@
-import type { CreateStudentInput, CreateTaskInput, DashboardData, ParentExport, PrintJob, Student, Task, TaskFile, TaskStatus } from "./types";
+import type { ChatMessage, CreateStudentInput, CreateTaskInput, DashboardData, ParentExport, PrintJob, Student, Task, TaskFile, TaskStatus } from "./types";
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -106,6 +106,23 @@ export function createPrintJob(input: { file: File; requester: string; copies: n
     method: "POST",
     body: formData
   });
+}
+
+export function createChatMessage(input: { authorRole: "teacher" | "assistant"; authorName: string; message: string }) {
+  return request<ChatMessage>("/api/chat-messages", {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function deleteChatMessage(messageId: string) {
+  const response = await fetch(`${apiBaseUrl}/api/chat-messages/${messageId}`, {
+    method: "DELETE"
+  });
+
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
 }
 
 export async function deletePrintJob(jobId: string) {

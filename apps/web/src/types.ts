@@ -87,6 +87,14 @@ export interface AuditLog {
   createdAt: string;
 }
 
+export interface ChatMessage {
+  id: string;
+  authorRole: "teacher" | "assistant";
+  authorName: string;
+  message: string;
+  createdAt: string;
+}
+
 export interface DashboardData {
   students: Student[];
   tasks: Task[];
@@ -94,6 +102,7 @@ export interface DashboardData {
   parentExports: ParentExport[];
   printJobs: PrintJob[];
   auditLogs: AuditLog[];
+  chatMessages: ChatMessage[];
   summary: {
     studentCount: number;
     activeTasks: number;
