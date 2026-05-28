@@ -249,7 +249,7 @@ async function seedIfEmpty(query: (sql: string, params?: RowValue[]) => Promise<
 
   const createdAt = now();
   await exec(
-    `INSERT INTO users (id, name, role, createdAt) VALUES
+    `${useMysql ? "INSERT IGNORE" : "INSERT OR IGNORE"} INTO users (id, name, role, createdAt) VALUES
       ('u-admin', 'Admin', 'admin', ?),
       ('u-teacher-lin', 'Lin Teacher', 'teacher', ?),
       ('u-assistant-chen', 'Chen TA', 'assistant', ?),
@@ -258,7 +258,7 @@ async function seedIfEmpty(query: (sql: string, params?: RowValue[]) => Promise<
   );
 
   await exec(
-    `INSERT INTO students (id, name, grade, targetScore, currentLevel, \`group\`, teacherId, assistantId, createdAt, updatedAt)
+    `${useMysql ? "INSERT IGNORE" : "INSERT OR IGNORE"} INTO students (id, name, grade, targetScore, currentLevel, \`group\`, teacherId, assistantId, createdAt, updatedAt)
      VALUES
       ('s-anna', 'Anna Zhang', 'Grade 11', 7, 'Reading 6.0 / Writing 5.5', 'VIP 1-on-1', 'u-teacher-lin', 'u-assistant-chen', ?, ?),
       ('s-kevin', 'Kevin Liu', 'Year 1', 6.5, 'Listening 6.0 / Speaking 5.5', 'Listening & Speaking', 'u-teacher-lin', 'u-assistant-chen', ?, ?)`,
@@ -266,7 +266,7 @@ async function seedIfEmpty(query: (sql: string, params?: RowValue[]) => Promise<
   );
 
   await exec(
-    `INSERT INTO tasks
+    `${useMysql ? "INSERT IGNORE" : "INSERT OR IGNORE"} INTO tasks
       (id, studentId, title, type, priority, dueDate, description, status, pinned, score, teacherComment, assistantNote, createdAt, updatedAt)
      VALUES
       ('t-reading-001', 's-anna', 'Cambridge 18 Test 2 Reading Passage 1', 'reading', 'high', '2026-06-01',
@@ -281,7 +281,7 @@ async function seedIfEmpty(query: (sql: string, params?: RowValue[]) => Promise<
   );
 
   await exec(
-    `INSERT INTO task_files (id, taskId, uploaderId, uploaderRole, name, fileType, url, createdAt)
+    `${useMysql ? "INSERT IGNORE" : "INSERT OR IGNORE"} INTO task_files (id, taskId, uploaderId, uploaderRole, name, fileType, url, createdAt)
      VALUES
       ('f-001', 't-reading-001', 'u-teacher-lin', 'teacher', 'Cambridge 18 Reading PDF', 'application/pdf', '/mock-files/cambridge-18-reading.pdf', ?),
       ('f-002', 't-writing-001', 'u-assistant-chen', 'assistant', 'Writing correction photo', 'image/jpeg', '/mock-files/writing-correction.jpg', ?)`,
@@ -289,7 +289,7 @@ async function seedIfEmpty(query: (sql: string, params?: RowValue[]) => Promise<
   );
 
   await exec(
-    `INSERT INTO parent_exports (id, taskId, title, imageUrl, createdAt)
+    `${useMysql ? "INSERT IGNORE" : "INSERT OR IGNORE"} INTO parent_exports (id, taskId, title, imageUrl, createdAt)
      VALUES ('e-001', 't-writing-001', 'Anna Zhang writing feedback', '/mock-exports/anna-writing-feedback.png', ?)`,
     [createdAt]
   );
