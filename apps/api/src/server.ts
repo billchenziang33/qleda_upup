@@ -5,7 +5,7 @@ import cors from "cors";
 import express from "express";
 import multer from "multer";
 import { z } from "zod";
-import { all, createId, get, run } from "./db.js";
+import { all, createId, databaseType, get, run } from "./db.js";
 
 type Priority = "high" | "medium" | "low";
 type TaskStatus = "not_started" | "in_progress" | "submitted" | "reviewed" | "completed";
@@ -324,7 +324,7 @@ async function createParentFeedbackImage(input: {
 }
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "qleda-api", database: "sqlite" });
+  res.json({ ok: true, service: "qleda-api", database: databaseType() });
 });
 
 app.get("/api/dashboard", async (_req, res, next) => {
@@ -332,7 +332,7 @@ app.get("/api/dashboard", async (_req, res, next) => {
     const [users, students, tasks, taskFiles, parentExports, printJobs, auditLogs, chatMessages] = await Promise.all([
       all("SELECT * FROM users ORDER BY createdAt ASC"),
       all<StudentRow>(
-        'SELECT id, name, grade, targetScore, currentLevel, "group" AS "group", teacherId, assistantId, createdAt, updatedAt FROM students ORDER BY createdAt ASC'
+        "SELECT id, name, grade, targetScore, currentLevel, `group` AS `group`, teacherId, assistantId, createdAt, updatedAt FROM students ORDER BY createdAt ASC"
       ),
       all<TaskRow>("SELECT * FROM tasks ORDER BY createdAt ASC"),
       all<TaskFileRow>("SELECT * FROM task_files ORDER BY createdAt ASC"),
@@ -422,7 +422,7 @@ app.get("/api/students", async (_req, res, next) => {
   try {
     res.json(
       await all<StudentRow>(
-        'SELECT id, name, grade, targetScore, currentLevel, "group" AS "group", teacherId, assistantId, createdAt, updatedAt FROM students ORDER BY createdAt ASC'
+        "SELECT id, name, grade, targetScore, currentLevel, `group` AS `group`, teacherId, assistantId, createdAt, updatedAt FROM students ORDER BY createdAt ASC"
       )
     );
   } catch (error) {
@@ -437,7 +437,7 @@ app.post("/api/students", async (req, res, next) => {
     const timestamp = now();
 
     await run(
-      `INSERT INTO students (id, name, grade, targetScore, currentLevel, "group", teacherId, assistantId, createdAt, updatedAt)
+      `INSERT INTO students (id, name, grade, targetScore, currentLevel, \`group\`, teacherId, assistantId, createdAt, updatedAt)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
@@ -454,7 +454,7 @@ app.post("/api/students", async (req, res, next) => {
     );
 
     const student = await get<StudentRow>(
-      'SELECT id, name, grade, targetScore, currentLevel, "group" AS "group", teacherId, assistantId, createdAt, updatedAt FROM students WHERE id = ?',
+      "SELECT id, name, grade, targetScore, currentLevel, `group` AS `group`, teacherId, assistantId, createdAt, updatedAt FROM students WHERE id = ?",
       [id]
     );
     res.status(201).json(student);
@@ -467,7 +467,7 @@ app.delete("/api/students/:studentId", async (req, res, next) => {
   try {
     const studentId = String(req.params.studentId);
     const existing = await get<StudentRow>(
-      'SELECT id, name, grade, targetScore, currentLevel, "group" AS "group", teacherId, assistantId, createdAt, updatedAt FROM students WHERE id = ?',
+      "SELECT id, name, grade, targetScore, currentLevel, `group` AS `group`, teacherId, assistantId, createdAt, updatedAt FROM students WHERE id = ?",
       [studentId]
     );
     if (!existing) {
@@ -791,7 +791,7 @@ app.post("/api/tasks/:taskId/parent-exports", async (req, res, next) => {
 
     const [student, files] = await Promise.all([
       get<StudentRow>(
-        'SELECT id, name, grade, targetScore, currentLevel, "group" AS "group", teacherId, assistantId, createdAt, updatedAt FROM students WHERE id = ?',
+        "SELECT id, name, grade, targetScore, currentLevel, `group` AS `group`, teacherId, assistantId, createdAt, updatedAt FROM students WHERE id = ?",
         [task.studentId]
       ),
       all<TaskFileRow>("SELECT * FROM task_files WHERE taskId = ? ORDER BY createdAt DESC", [task.id])

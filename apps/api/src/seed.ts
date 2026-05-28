@@ -1,4 +1,4 @@
-import { getDatabase } from "./db.js";
+import { databaseType, getDatabase } from "./db.js";
 
 await getDatabase();
-console.log("SQLite database is ready.");
+console.log(`${databaseType()} database is ready.`);
