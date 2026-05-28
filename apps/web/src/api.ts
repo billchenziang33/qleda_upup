@@ -91,9 +91,53 @@ export async function deleteTaskFile(fileId: string) {
   }
 }
 
-export function uploadTaskFile(taskId: string, input: { file: File; uploaderId: string; uploaderRole: string }) {
+async function compressImageFile(file: File) {
+  if (!file.type.startsWith("image/") || file.type === "image/gif" || file.size < 350 * 1024) {
+    return file;
+  }
+
+  const image = new Image();
+  const objectUrl = URL.createObjectURL(file);
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve();
+      image.onerror = () => reject(new Error("Image compression failed"));
+      image.src = objectUrl;
+    });
+
+    const maxSide = 1800;
+    const ratio = Math.min(1, maxSide / Math.max(image.naturalWidth, image.naturalHeight));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * ratio));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * ratio));
+
+    const context = canvas.getContext("2d");
+    if (!context) return file;
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.82));
+    if (!blob || blob.size >= file.size) return file;
+
+    const compressedName = file.name.replace(/\.[^.]+$/, "") + ".jpg";
+    return new File([blob], compressedName, {
+      type: "image/jpeg",
+      lastModified: file.lastModified
+    });
+  } catch {
+    return file;
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+export async function uploadTaskFile(
+  taskId: string,
+  input: { file: File; uploaderId: string; uploaderRole: string; compressImage?: boolean }
+) {
+  const file = input.compressImage ? await compressImageFile(input.file) : input.file;
   const formData = new FormData();
-  formData.append("file", input.file);
+  formData.append("file", file);
   formData.append("uploaderId", input.uploaderId);
   formData.append("uploaderRole", input.uploaderRole);
 

@@ -363,12 +363,12 @@ function App() {
       if (!task) throw new Error("Task not found");
       const student = dashboard?.students.find((item) => item.id === task.studentId);
       const correctionImages = dashboard?.taskFiles
-        .filter((file) => file.taskId === taskId && file.uploaderRole === "assistant" && file.fileType.startsWith("image/"))
+        .filter((file) => file.taskId === taskId && file.fileType.startsWith("image/"))
         .slice(-9);
       if (!correctionImages?.length) throw new Error("No correction image");
       await downloadParentFeedbackPng({ task, student, correctionImages });
     } catch {
-      window.alert("导出失败：请先上传图片格式的批改后文件，并确认老师评语已填写。");
+      window.alert("导出失败：请先上传图片格式的批改后文件。");
     } finally {
       setBusyTaskId(null);
     }
@@ -481,7 +481,8 @@ function App() {
           uploadTaskFile(correctionTaskId, {
             file,
             uploaderId: "u-assistant-chen",
-            uploaderRole: "assistant"
+            uploaderRole: "assistant",
+            compressImage: true
           })
         )
       );

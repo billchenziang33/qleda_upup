@@ -262,7 +262,17 @@ function wrapSvgText(value: string, maxChars = 24) {
   return lines;
 }
 
-async function imageDataUriFromUpload(file: TaskFileRow) {
+async function imageDataUriFromTaskFile(file: TaskFileRow) {
+  if (file.url.startsWith("data:")) return file.url;
+
+  if (file.url.startsWith("http://") || file.url.startsWith("https://")) {
+    const response = await fetch(file.url);
+    if (!response.ok) throw new Error(`Failed to fetch correction image: ${response.status}`);
+    const bytes = Buffer.from(await response.arrayBuffer());
+    const contentType = response.headers.get("content-type") || file.fileType;
+    return `data:${contentType};base64,${bytes.toString("base64")}`;
+  }
+
   const storedName = basename(file.url.replace("/uploads/", ""));
   const bytes = await readFile(join(uploadDirectory, storedName));
   return `data:${file.fileType};base64,${bytes.toString("base64")}`;
@@ -278,7 +288,7 @@ async function createParentFeedbackImage(input: {
   const exportedUrl = `/exports/${exportedName}`;
   const comment = input.task.teacherComment || input.task.assistantNote || "老师暂未留下文字评语，请以批改图片为准。";
   const commentLines = wrapSvgText(comment);
-  const imageDataUri = await imageDataUriFromUpload(input.correctionImage);
+  const imageDataUri = await imageDataUriFromTaskFile(input.correctionImage);
   const height = Math.max(1120, 900 + commentLines.length * 34);
   const commentTspans = commentLines
     .map((line, index) => `<tspan x="86" dy="${index === 0 ? 0 : 34}">${escapeXml(line)}</tspan>`)
@@ -796,9 +806,7 @@ app.post("/api/tasks/:taskId/parent-exports", async (req, res, next) => {
       ),
       all<TaskFileRow>("SELECT * FROM task_files WHERE taskId = ? ORDER BY createdAt DESC", [task.id])
     ]);
-    const correctionImage = files.find(
-      (file) => file.uploaderRole === "assistant" && file.fileType.startsWith("image/") && file.url.startsWith("/uploads/")
-    );
+    const correctionImage = files.find((file) => file.fileType.startsWith("image/"));
 
     if (!correctionImage) {
       res.status(404).json({ message: "No correction image found for this task" });
