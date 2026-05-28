@@ -82,13 +82,29 @@ interface ChatMessageRow {
   createdAt: string;
 }
 
-const app = express();
+export const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 const port = Number(process.env.PORT ?? 4000);
+const host = process.env.HOST ?? "0.0.0.0";
 const uploadDirectory = fileURLToPath(new URL("../data/uploads", import.meta.url));
 const exportDirectory = fileURLToPath(new URL("../data/exports", import.meta.url));
 
-app.use(cors({ origin: process.env.WEB_ORIGIN ?? "http://localhost:5173" }));
+const allowedOrigins = (process.env.WEB_ORIGIN ?? "http://localhost:5173")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.includes("*") || allowedOrigins.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error(`Origin ${origin} is not allowed by CORS`));
+    }
+  })
+);
 app.use(express.json());
 app.use("/uploads", express.static(uploadDirectory));
 app.use("/exports", express.static(exportDirectory));
@@ -812,6 +828,14 @@ app.use((error: unknown, _req: express.Request, res: express.Response, _next: ex
   res.status(500).json({ message: "Internal server error" });
 });
 
-app.listen(port, () => {
-  console.log(`QLEDA API is running on http://localhost:${port}`);
-});
+export function startServer() {
+  return app.listen(port, host, () => {
+    console.log(`QLEDA API is running on http://${host}:${port}`);
+  });
+}
+
+if (process.env.QLEDA_DISABLE_LISTEN !== "true") {
+  startServer();
+}
+
+export default app;

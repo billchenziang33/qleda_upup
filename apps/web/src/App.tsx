@@ -30,6 +30,7 @@ import {
   deleteTask,
   deleteTaskFile,
   getDashboard,
+  resolveApiUrl,
   updatePrintJob,
   updateTask,
   uploadTaskFile
@@ -149,7 +150,7 @@ async function downloadParentFeedbackPng(input: {
   student?: Student;
   correctionImages: TaskFile[];
 }) {
-  const correctionImages = await Promise.all(input.correctionImages.map((file) => loadImage(file.url)));
+  const correctionImages = await Promise.all(input.correctionImages.map((file) => loadImage(resolveApiUrl(file.url))));
   const width = 900;
   const padding = 64;
   const contentWidth = width - padding * 2;
@@ -1624,6 +1625,8 @@ function FilePreviewModal({
   file: TaskFile | { name: string; url: string; fileType: string };
   onClose: () => void;
 }) {
+  const fileUrl = resolveApiUrl(file.url);
+
   return (
     <div className="modal-backdrop" role="presentation">
       <div className="file-preview-modal">
@@ -1637,13 +1640,13 @@ function FilePreviewModal({
           </button>
         </div>
         {file.fileType.startsWith("image/") ? (
-          <img src={file.url} alt={file.name} />
+          <img src={fileUrl} alt={file.name} />
         ) : file.fileType === "application/pdf" ? (
-          <iframe title={file.name} src={file.url} />
+          <iframe title={file.name} src={fileUrl} />
         ) : (
           <div className="preview-fallback">
             <p>当前文件类型不能直接内嵌预览，可以点击下方按钮打开或下载。</p>
-            <a href={file.url} target="_blank" rel="noreferrer">
+            <a href={fileUrl} target="_blank" rel="noreferrer">
               打开文件
             </a>
           </div>
@@ -1912,7 +1915,9 @@ function FileSection({
         {files.length ? (
           <>
             <button type="button" className="file-bundle-button" onClick={() => setExpanded((current) => !current)}>
-              {previewFile?.fileType.startsWith("image/") && <img className="file-bundle-preview" src={previewFile.url} alt={previewFile.name} />}
+              {previewFile?.fileType.startsWith("image/") && (
+                <img className="file-bundle-preview" src={resolveApiUrl(previewFile.url)} alt={previewFile.name} />
+              )}
               <span>
                 <b>{title}</b>
                 <em>{bundleLabel}</em>
@@ -1935,7 +1940,7 @@ function FileSection({
                       </button>
                     )}
                     <button type="button" className="file-preview-button" onClick={() => onPreview?.(file)}>
-                      {file.fileType.startsWith("image/") && <img className="file-preview" src={file.url} alt={file.name} />}
+                      {file.fileType.startsWith("image/") && <img className="file-preview" src={resolveApiUrl(file.url)} alt={file.name} />}
                       <span>{file.name}</span>
                     </button>
                   </div>
