@@ -76,6 +76,11 @@ const emptyStudentForm: CreateStudentInput = {
 
 const ieltsScores = Array.from({ length: 19 }, (_, index) => (index * 0.5).toFixed(1).replace(".0", ""));
 const dashboardSyncIntervalMs = 4000;
+const dashboardInitialRetryDelaysMs = [0, 1500, 3000, 6000, 10000];
+
+function wait(ms: number) {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+}
 
 const studentGroupCollator = new Intl.Collator("zh-CN", {
   numeric: true,
@@ -361,16 +366,35 @@ function App() {
   const dashboardRef = useRef<DashboardData | null>(null);
   const isLoadingDashboardRef = useRef(false);
 
-  async function loadDashboard(options: { silent?: boolean } = {}) {
+  async function loadDashboard(options: { silent?: boolean; retryDelays?: number[] } = {}) {
     if (isLoadingDashboardRef.current) return;
     isLoadingDashboardRef.current = true;
+    const retryDelays = options.retryDelays ?? (options.silent ? [0] : dashboardInitialRetryDelaysMs);
     try {
-      if (!options.silent) setError("");
-      const nextDashboard = await getDashboard();
-      dashboardRef.current = nextDashboard;
-      setDashboard(nextDashboard);
+      for (let attempt = 0; attempt < retryDelays.length; attempt += 1) {
+        if (retryDelays[attempt] > 0) {
+          if (!options.silent && !dashboardRef.current) {
+            setError(`API is starting, retrying... (${attempt}/${retryDelays.length - 1})`);
+          }
+          await wait(retryDelays[attempt]);
+        } else if (!options.silent) {
+          setError("");
+        }
+
+        try {
+          const nextDashboard = await getDashboard();
+          dashboardRef.current = nextDashboard;
+          setDashboard(nextDashboard);
+          setError("");
+          return;
+        } catch {
+          if (attempt === retryDelays.length - 1) throw new Error("Dashboard load failed");
+        }
+      }
     } catch {
-      setError("后端服务暂时不可用，请确认 API 已经启动。");
+      if (!options.silent || !dashboardRef.current) {
+        setError("API is still starting. Please wait a moment or refresh.");
+      }
     } finally {
       isLoadingDashboardRef.current = false;
     }
