@@ -1059,6 +1059,22 @@ blockquote span {
   cursor: wait;
 }
 
+.teacher-note-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.teacher-note-actions small {
+  color: var(--green-dark);
+  font-weight: 900;
+}
+
+.teacher-note-actions small.error {
+  color: var(--rose);
+}
+
 .task-actions {
   display: grid;
   align-content: start;

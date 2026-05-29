@@ -1920,17 +1920,27 @@ function StudentCard({
 function TeacherNoteEditor({ task, onSave }: { task: Task; onSave: () => Promise<void> }) {
   const [note, setNote] = useState(task.teacherComment ?? "");
   const [isSaving, setIsSaving] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saved" | "error">("idle");
 
   useEffect(() => {
-    setNote(task.teacherComment ?? "");
-  }, [task.id, task.teacherComment]);
+    if (!isEditing && !isSaving) {
+      setNote(task.teacherComment ?? "");
+      setSaveStatus("idle");
+    }
+  }, [isEditing, isSaving, task.id, task.teacherComment]);
 
   async function handleSave() {
     setIsSaving(true);
+    setSaveStatus("idle");
     try {
-      await updateTask(task.id, { teacherComment: note });
+      const savedTask = await updateTask(task.id, { teacherComment: note });
+      setNote(savedTask.teacherComment ?? "");
       await onSave();
+      setIsEditing(false);
+      setSaveStatus("saved");
     } catch {
+      setSaveStatus("error");
       window.alert("老师备注保存失败，请确认后端服务正常。");
     } finally {
       setIsSaving(false);
@@ -1941,11 +1951,23 @@ function TeacherNoteEditor({ task, onSave }: { task: Task; onSave: () => Promise
     <div className="teacher-note-editor">
       <label>
         老师备注
-        <textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="在这里添加给学生或家长看的备注..." />
+        <textarea
+          value={note}
+          onChange={(event) => {
+            setIsEditing(true);
+            setSaveStatus("idle");
+            setNote(event.target.value);
+          }}
+          placeholder="在这里添加给学生或家长看的备注..."
+        />
       </label>
-      <button type="button" onClick={() => void handleSave()} disabled={isSaving}>
-        {isSaving ? "保存中..." : "保存备注"}
-      </button>
+      <div className="teacher-note-actions">
+        <button type="button" onClick={() => void handleSave()} disabled={isSaving}>
+          {isSaving ? "保存中..." : "保存备注"}
+        </button>
+        {saveStatus === "saved" && <small>已保存</small>}
+        {saveStatus === "error" && <small className="error">保存失败</small>}
+      </div>
     </div>
   );
 }
