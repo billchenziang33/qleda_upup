@@ -1,6 +1,8 @@
 import type { ChatMessage, CreateStudentInput, CreateTaskInput, DashboardData, ParentExport, PrintJob, Student, Task, TaskFile, TaskStatus } from "./types";
 
-export const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
+const cloudBaseRunApiUrl = "https://qleda-api-263206-10-1437709388.sh.run.tcloudbase.com";
+
+export const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? (import.meta.env.PROD ? cloudBaseRunApiUrl : "")).replace(/\/$/, "");
 
 export function resolveApiUrl(path: string) {
   if (!path || path.startsWith("http://") || path.startsWith("https://") || path.startsWith("data:") || path.startsWith("blob:")) {
