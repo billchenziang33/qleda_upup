@@ -99,6 +99,8 @@ function sqliteSchema(db: Database) {
       name TEXT NOT NULL,
       fileType TEXT NOT NULL,
       url TEXT NOT NULL,
+      fileData TEXT,
+      fileSize INTEGER,
       createdAt TEXT NOT NULL,
       FOREIGN KEY (taskId) REFERENCES tasks(id) ON DELETE CASCADE
     );
@@ -151,6 +153,19 @@ function sqliteSchema(db: Database) {
   `);
 }
 
+function ensureSqliteColumn(db: Database, table: string, column: string, definition: string) {
+  const columns = db.exec(`PRAGMA table_info(${table})`)[0]?.values ?? [];
+  const hasColumn = columns.some((row) => row[1] === column);
+  if (!hasColumn) {
+    db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
+function sqliteMigrations(db: Database) {
+  ensureSqliteColumn(db, "task_files", "fileData", "TEXT");
+  ensureSqliteColumn(db, "task_files", "fileSize", "INTEGER");
+}
+
 const mysqlStatements = [
   `CREATE TABLE IF NOT EXISTS users (
     id VARCHAR(80) PRIMARY KEY,
@@ -197,6 +212,8 @@ const mysqlStatements = [
     name VARCHAR(255) NOT NULL,
     fileType VARCHAR(120) NOT NULL,
     url TEXT NOT NULL,
+    fileData LONGTEXT,
+    fileSize BIGINT,
     createdAt VARCHAR(40) NOT NULL,
     INDEX idx_task_files_task (taskId),
     CONSTRAINT fk_task_files_task FOREIGN KEY (taskId) REFERENCES tasks(id) ON DELETE CASCADE
@@ -242,6 +259,23 @@ const mysqlStatements = [
     INDEX idx_chat_messages_created (createdAt)
   )`
 ];
+
+async function ensureMysqlColumn(pool: Pool, table: string, column: string, definition: string) {
+  const [rows] = await pool.execute<RowDataPacket[]>(
+    `SELECT COUNT(*) AS count
+     FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+    [table, column]
+  );
+  if (Number(rows[0]?.count ?? 0) === 0) {
+    await pool.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
+async function mysqlMigrations(pool: Pool) {
+  await ensureMysqlColumn(pool, "task_files", "fileData", "LONGTEXT");
+  await ensureMysqlColumn(pool, "task_files", "fileSize", "BIGINT");
+}
 
 async function seedIfEmpty(query: (sql: string, params?: RowValue[]) => Promise<unknown[]>, exec: (sql: string, params?: RowValue[]) => Promise<void>) {
   const count = (await query("SELECT COUNT(*) AS count FROM users"))[0] as { count: number } | undefined;
@@ -302,6 +336,7 @@ async function getSqliteDatabase() {
   sqliteDatabase = existsSync(databasePath) ? new SQL.Database(readFileSync(databasePath)) : new SQL.Database();
   sqliteDatabase.run("PRAGMA foreign_keys = ON;");
   sqliteSchema(sqliteDatabase);
+  sqliteMigrations(sqliteDatabase);
   await seedIfEmpty(
     async (sql, params = []) => mapSqliteRows(sqliteDatabase!.exec(sql, params)),
     async (sql, params = []) => {
@@ -332,6 +367,7 @@ async function getMysqlPool() {
     for (const statement of mysqlStatements) {
       await mysqlPool.execute(statement);
     }
+    await mysqlMigrations(mysqlPool);
     await seedIfEmpty(
       async (sql, params = []) => {
         const [rows] = await mysqlPool!.execute<RowDataPacket[]>(sql, params);

@@ -48,6 +48,8 @@ interface TaskFileRow {
   name: string;
   fileType: string;
   url: string;
+  fileData?: string | null;
+  fileSize?: number | null;
   createdAt: string;
 }
 
@@ -218,8 +220,10 @@ function normalizeUploadedFileName(value: string | undefined | null, fallback = 
 }
 
 function mapTaskFile(file: TaskFileRow) {
+  const { fileData: _fileData, fileSize: _fileSize, ...safeFile } = file;
   return {
-    ...file,
+    ...safeFile,
+    url: `/api/task-files/${file.id}/content`,
     name: normalizeUploadedFileName(file.name, "Untitled attachment")
   };
 }
@@ -263,6 +267,10 @@ function wrapSvgText(value: string, maxChars = 24) {
 }
 
 async function imageDataUriFromTaskFile(file: TaskFileRow) {
+  if (file.fileData) {
+    return `data:${file.fileType};base64,${file.fileData}`;
+  }
+
   if (file.url.startsWith("data:")) return file.url;
 
   if (file.url.startsWith("http://") || file.url.startsWith("https://")) {
@@ -276,6 +284,30 @@ async function imageDataUriFromTaskFile(file: TaskFileRow) {
   const storedName = basename(file.url.replace("/uploads/", ""));
   const bytes = await readFile(join(uploadDirectory, storedName));
   return `data:${file.fileType};base64,${bytes.toString("base64")}`;
+}
+
+async function readTaskFileBytes(file: TaskFileRow) {
+  if (file.fileData) {
+    return Buffer.from(file.fileData, "base64");
+  }
+
+  if (file.url.startsWith("data:")) {
+    const base64 = file.url.split(",", 2)[1] ?? "";
+    return Buffer.from(base64, "base64");
+  }
+
+  if (file.url.startsWith("http://") || file.url.startsWith("https://")) {
+    const response = await fetch(file.url);
+    if (!response.ok) return null;
+    return Buffer.from(await response.arrayBuffer());
+  }
+
+  if (file.url.startsWith("/uploads/")) {
+    const storedName = basename(file.url.replace("/uploads/", ""));
+    return readFile(join(uploadDirectory, storedName)).catch(() => null);
+  }
+
+  return null;
 }
 
 async function createParentFeedbackImage(input: {
@@ -345,7 +377,9 @@ app.get("/api/dashboard", async (_req, res, next) => {
         "SELECT id, name, grade, targetScore, currentLevel, `group` AS `group`, teacherId, assistantId, createdAt, updatedAt FROM students ORDER BY createdAt ASC"
       ),
       all<TaskRow>("SELECT * FROM tasks ORDER BY createdAt ASC"),
-      all<TaskFileRow>("SELECT * FROM task_files ORDER BY createdAt ASC"),
+      all<TaskFileRow>(
+        "SELECT id, taskId, uploaderId, uploaderRole, name, fileType, url, fileSize, createdAt FROM task_files ORDER BY createdAt ASC"
+      ),
       all("SELECT * FROM parent_exports ORDER BY createdAt DESC"),
       all<PrintJobRow>("SELECT * FROM print_jobs ORDER BY createdAt DESC"),
       all<AuditLogRow>("SELECT * FROM audit_logs ORDER BY createdAt DESC LIMIT 80"),
@@ -628,17 +662,22 @@ app.post("/api/tasks/:taskId/files", upload.single("file"), async (req, res, nex
       await writeFile(join(uploadDirectory, storedName), req.file.buffer);
     }
 
+    const fileBuffer = req.file?.buffer;
+    const fileType = req.file?.mimetype ?? "application/octet-stream";
+
     await run(
-      `INSERT INTO task_files (id, taskId, uploaderId, uploaderRole, name, fileType, url, createdAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO task_files (id, taskId, uploaderId, uploaderRole, name, fileType, url, fileData, fileSize, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         task.id,
         String(req.body.uploaderId ?? "u-teacher-lin"),
         String(req.body.uploaderRole ?? "teacher"),
         normalizeUploadedFileName(req.file?.originalname, "Untitled attachment"),
-        req.file?.mimetype ?? "application/octet-stream",
+        fileType,
         fileUrl,
+        fileBuffer ? fileBuffer.toString("base64") : null,
+        fileBuffer?.length ?? null,
         now()
       ]
     );
@@ -650,7 +689,40 @@ app.post("/api/tasks/:taskId/files", upload.single("file"), async (req, res, nex
       detail: `${String(req.body.uploaderRole ?? "teacher")} uploaded ${originalName}`
     });
 
-    res.status(201).json(await get("SELECT * FROM task_files WHERE id = ?", [id]));
+    const createdFile = await get<TaskFileRow>(
+      "SELECT id, taskId, uploaderId, uploaderRole, name, fileType, url, fileSize, createdAt FROM task_files WHERE id = ?",
+      [id]
+    );
+    res.status(201).json(createdFile ? mapTaskFile(createdFile) : createdFile);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/task-files/:fileId/content", async (req, res, next) => {
+  try {
+    const file = await get<TaskFileRow>("SELECT * FROM task_files WHERE id = ?", [String(req.params.fileId)]);
+    if (!file) {
+      res.status(404).json({ message: "File not found" });
+      return;
+    }
+
+    const bytes = await readTaskFileBytes(file);
+    if (!bytes) {
+      res.status(404).json({ message: "Stored file content is no longer available" });
+      return;
+    }
+
+    res.setHeader("Content-Type", file.fileType || "application/octet-stream");
+    res.setHeader("Content-Length", String(bytes.length));
+    res.setHeader("Cache-Control", "private, max-age=3600");
+    res.setHeader(
+      "Content-Disposition",
+      `${file.fileType.startsWith("image/") || file.fileType === "application/pdf" ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(
+        normalizeUploadedFileName(file.name, "attachment")
+      )}`
+    );
+    res.end(bytes);
   } catch (error) {
     next(error);
   }
