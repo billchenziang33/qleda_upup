@@ -1337,9 +1337,9 @@ function App() {
                           </option>
                         ))}
                       </select>
-                      <button type="button" className="preview-print-button" onClick={() => setPreviewFile({ name: job.fileName, url: job.fileUrl, fileType: job.fileType })}>
-                        预览
-                      </button>
+                      <a className="preview-print-button" href={resolveApiUrl(job.fileUrl)} download={job.fileName}>
+                        Download
+                      </a>
                       {job.note && <small>{job.note}</small>}
                     </div>
                   </div>

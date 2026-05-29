@@ -1481,7 +1481,11 @@ blockquote span {
   color: #fffdf5;
   background: var(--green-dark);
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   font-weight: 900;
+  text-decoration: none;
 }
 
 .delete-print-job-button {
