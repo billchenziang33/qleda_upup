@@ -266,6 +266,11 @@ function wrapSvgText(value: string, maxChars = 24) {
   return lines;
 }
 
+function sanitizeExportFileName(value: string | undefined | null, fallback: string) {
+  const clean = String(value ?? "").trim().replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, "_");
+  return clean || fallback;
+}
+
 async function imageDataUriFromTaskFile(file: TaskFileRow) {
   if (file.fileData) {
     return `data:${file.fileType};base64,${file.fileData}`;
@@ -316,8 +321,10 @@ async function createParentFeedbackImage(input: {
   correctionImage: TaskFileRow;
 }) {
   const id = createId("e");
-  const exportedName = `${id}-parent-feedback.svg`;
-  const exportedUrl = `/exports/${exportedName}`;
+  const studentName = sanitizeExportFileName(input.student?.name, "学生");
+  const taskTitle = sanitizeExportFileName(input.task.title.slice(0, 24), "任务");
+  const exportedName = `${studentName}-${taskTitle}-家长反馈长图-${id}.svg`;
+  const exportedUrl = `/exports/${encodeURIComponent(exportedName)}`;
   const comment = input.task.teacherComment || input.task.assistantNote || "老师暂未留下文字评语，请以批改图片为准。";
   const commentLines = wrapSvgText(comment);
   const imageDataUri = await imageDataUriFromTaskFile(input.correctionImage);
