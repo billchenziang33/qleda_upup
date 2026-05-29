@@ -19,6 +19,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
           "Content-Type": "application/json",
           ...init?.headers
         },
+    cache: init?.method ? init.cache : "no-store",
     ...init
   });
 
@@ -91,8 +92,15 @@ export async function deleteTaskFile(fileId: string) {
   }
 }
 
-async function compressImageFile(file: File) {
-  if (!file.type.startsWith("image/") || file.type === "image/gif" || file.size < 350 * 1024) {
+type ImageCompressionOptions = {
+  maxSide?: number;
+  quality?: number;
+  minBytes?: number;
+};
+
+async function compressImageFile(file: File, options: ImageCompressionOptions = {}) {
+  const minBytes = options.minBytes ?? 350 * 1024;
+  if (!file.type.startsWith("image/") || file.type === "image/gif" || file.size < minBytes) {
     return file;
   }
 
@@ -106,7 +114,7 @@ async function compressImageFile(file: File) {
       image.src = objectUrl;
     });
 
-    const maxSide = 1800;
+    const maxSide = options.maxSide ?? 1800;
     const ratio = Math.min(1, maxSide / Math.max(image.naturalWidth, image.naturalHeight));
     const canvas = document.createElement("canvas");
     canvas.width = Math.max(1, Math.round(image.naturalWidth * ratio));
@@ -114,9 +122,13 @@ async function compressImageFile(file: File) {
 
     const context = canvas.getContext("2d");
     if (!context) return file;
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
     context.drawImage(image, 0, 0, canvas.width, canvas.height);
 
-    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.82));
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob(resolve, "image/jpeg", options.quality ?? 0.82)
+    );
     if (!blob || blob.size >= file.size) return file;
 
     const compressedName = file.name.replace(/\.[^.]+$/, "") + ".jpg";
@@ -133,9 +145,17 @@ async function compressImageFile(file: File) {
 
 export async function uploadTaskFile(
   taskId: string,
-  input: { file: File; uploaderId: string; uploaderRole: string; compressImage?: boolean }
+  input: {
+    file: File;
+    uploaderId: string;
+    uploaderRole: string;
+    compressImage?: boolean | ImageCompressionOptions;
+  }
 ) {
-  const file = input.compressImage ? await compressImageFile(input.file) : input.file;
+  const file =
+    input.compressImage
+      ? await compressImageFile(input.file, typeof input.compressImage === "object" ? input.compressImage : undefined)
+      : input.file;
   const formData = new FormData();
   formData.append("file", file);
   formData.append("uploaderId", input.uploaderId);

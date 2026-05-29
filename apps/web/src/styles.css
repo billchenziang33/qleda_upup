@@ -600,7 +600,7 @@ button.metric-card {
 .student-item {
   width: 100%;
   display: grid;
-  gap: 0;
+  gap: 5px;
   min-height: 48px;
   padding: 12px 16px 12px 18px;
   text-align: left;
@@ -698,6 +698,12 @@ button.metric-card {
 .student-item em {
   color: var(--muted);
   font-style: normal;
+  font-size: 0.78rem;
+  font-weight: 850;
+  line-height: 1.15;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .board-header {
@@ -1078,8 +1084,22 @@ blockquote span {
   gap: 8px;
 }
 
+.file-section.assignment {
+  --file-accent: #8a5a12;
+  --file-bg: rgba(248, 201, 118, 0.16);
+  --file-border: rgba(182, 127, 26, 0.22);
+  --file-text: #6e4a10;
+}
+
+.file-section.correction {
+  --file-accent: #0b6b59;
+  --file-bg: rgba(15, 118, 94, 0.1);
+  --file-border: rgba(15, 118, 94, 0.18);
+  --file-text: #0a4e42;
+}
+
 .file-section > strong {
-  color: var(--green-dark);
+  color: var(--file-accent, var(--green-dark));
   font-size: 0.86rem;
   letter-spacing: 0.08em;
 }
@@ -1096,10 +1116,10 @@ blockquote span {
 .file-preview-button {
   padding: 10px;
   border-radius: 16px;
-  color: var(--green-dark);
+  color: var(--file-text, var(--green-dark));
   text-decoration: none;
-  background: rgba(15, 118, 94, 0.08);
-  border: 1px solid rgba(15, 118, 94, 0.08);
+  background: var(--file-bg, rgba(15, 118, 94, 0.08));
+  border: 1px solid var(--file-border, rgba(15, 118, 94, 0.08));
 }
 
 .file-stack a,
@@ -1119,10 +1139,10 @@ blockquote span {
   width: 100%;
   min-height: 62px;
   padding: 10px !important;
-  border: 1px solid rgba(15, 118, 94, 0.1) !important;
+  border: 1px solid var(--file-border, rgba(15, 118, 94, 0.1)) !important;
   border-radius: 18px !important;
-  color: var(--green-dark) !important;
-  background: rgba(15, 118, 94, 0.08) !important;
+  color: var(--file-text, var(--green-dark)) !important;
+  background: var(--file-bg, rgba(15, 118, 94, 0.08)) !important;
   display: grid !important;
   grid-template-columns: 48px minmax(0, 1fr) auto;
   gap: 10px !important;
@@ -1134,7 +1154,7 @@ blockquote span {
 
 .file-bundle-button:hover {
   transform: translateY(-1px) !important;
-  background: rgba(15, 118, 94, 0.12) !important;
+  background: color-mix(in srgb, var(--file-bg, rgba(15, 118, 94, 0.08)) 82%, white) !important;
   box-shadow: 0 10px 22px rgba(7, 63, 52, 0.08) !important;
 }
 
@@ -1144,7 +1164,7 @@ blockquote span {
   border-radius: 13px;
   object-fit: cover;
   background: #fff;
-  border: 1px solid rgba(15, 118, 94, 0.12);
+  border: 1px solid var(--file-border, rgba(15, 118, 94, 0.12));
 }
 
 .file-bundle-button span {
@@ -1164,7 +1184,7 @@ blockquote span {
 
 .file-bundle-button em,
 .file-bundle-button small {
-  color: var(--muted);
+  color: color-mix(in srgb, var(--file-accent, var(--muted)) 68%, #50605c);
   font-style: normal;
   font-weight: 800;
 }
@@ -1200,7 +1220,7 @@ blockquote span {
 .file-stack a:hover,
 .file-preview-button:hover {
   text-decoration: underline;
-  background: rgba(15, 118, 94, 0.12);
+  background: color-mix(in srgb, var(--file-bg, rgba(15, 118, 94, 0.08)) 82%, white);
 }
 
 .file-preview {
@@ -1208,7 +1228,7 @@ blockquote span {
   max-height: 180px;
   object-fit: cover;
   border-radius: 14px;
-  border: 1px solid rgba(15, 118, 94, 0.12);
+  border: 1px solid var(--file-border, rgba(15, 118, 94, 0.12));
 }
 
 .form-context {

@@ -75,6 +75,20 @@ const emptyStudentForm: CreateStudentInput = {
 };
 
 const ieltsScores = Array.from({ length: 19 }, (_, index) => (index * 0.5).toFixed(1).replace(".0", ""));
+const dashboardSyncIntervalMs = 4000;
+
+const studentGroupCollator = new Intl.Collator("zh-CN", {
+  numeric: true,
+  sensitivity: "base"
+});
+
+function sortStudentsByGroup(students: Student[]) {
+  return [...students].sort((left, right) => {
+    const groupCompare = studentGroupCollator.compare(left.group || "", right.group || "");
+    if (groupCompare !== 0) return groupCompare;
+    return studentGroupCollator.compare(left.name, right.name);
+  });
+}
 
 const emptyTaskForm: CreateTaskInput = {
   studentId: "",
@@ -118,10 +132,30 @@ function wrapCanvasText(context: CanvasRenderingContext2D, text: string, maxWidt
 function loadImage(src: string) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
     const image = new Image();
+    if (src.startsWith("http://") || src.startsWith("https://")) {
+      image.crossOrigin = "anonymous";
+    }
+    image.decoding = "async";
     image.onload = () => resolve(image);
     image.onerror = () => reject(new Error("Image load failed"));
     image.src = src;
   });
+}
+
+async function runWithConcurrency<TInput>(
+  items: TInput[],
+  limit: number,
+  worker: (item: TInput, index: number) => Promise<void>
+) {
+  let currentIndex = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length || 1)) }, async () => {
+    while (currentIndex < items.length) {
+      const index = currentIndex;
+      currentIndex += 1;
+      await worker(items[index], index);
+    }
+  });
+  await Promise.all(workers);
 }
 
 function drawRoundRect(
@@ -155,6 +189,7 @@ async function downloadParentFeedbackPng(input: {
   const padding = 64;
   const contentWidth = width - padding * 2;
   const imageMaxHeight = 720;
+  const exportScale = 2;
   const imageLayouts = correctionImages.map((image) => {
     const imageRatio = Math.min(contentWidth / image.naturalWidth, imageMaxHeight / image.naturalHeight);
     return {
@@ -175,10 +210,13 @@ async function downloadParentFeedbackPng(input: {
   const height = 930 + imageSectionHeight + commentLines.length * 36;
 
   const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
+  canvas.width = width * exportScale;
+  canvas.height = height * exportScale;
   const context = canvas.getContext("2d");
   if (!context) throw new Error("Canvas is not available");
+  context.scale(exportScale, exportScale);
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
 
   const gradient = context.createLinearGradient(0, 0, width, height);
   gradient.addColorStop(0, "#fff8e8");
@@ -253,11 +291,16 @@ async function downloadParentFeedbackPng(input: {
 
   const link = document.createElement("a");
   const safeStudentName = (input.student?.name ?? "student").replace(/[\\/:*?"<>|]+/g, "_");
-  link.href = canvas.toDataURL("image/png");
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+  if (!blob) throw new Error("Image export failed");
+  const objectUrl = URL.createObjectURL(blob);
+  link.href = objectUrl;
   link.download = `${safeStudentName}-${input.task.title.slice(0, 24).replace(/[\\/:*?"<>|]+/g, "_")}-家长反馈.png`;
+  link.download = `${safeStudentName}-${input.task.title.slice(0, 24).replace(/[\\/:*?"<>|]+/g, "_")}-parent-feedback.png`;
   document.body.appendChild(link);
   link.click();
   link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
 }
 
 function App() {
@@ -315,18 +358,44 @@ function App() {
   const [chatError, setChatError] = useState("");
   const [isSendingChat, setIsSendingChat] = useState(false);
   const [deletingChatMessageId, setDeletingChatMessageId] = useState<string | null>(null);
+  const dashboardRef = useRef<DashboardData | null>(null);
+  const isLoadingDashboardRef = useRef(false);
 
-  async function loadDashboard() {
+  async function loadDashboard(options: { silent?: boolean } = {}) {
+    if (isLoadingDashboardRef.current) return;
+    isLoadingDashboardRef.current = true;
     try {
-      setError("");
-      setDashboard(await getDashboard());
+      if (!options.silent) setError("");
+      const nextDashboard = await getDashboard();
+      dashboardRef.current = nextDashboard;
+      setDashboard(nextDashboard);
     } catch {
       setError("后端服务暂时不可用，请确认 API 已经启动。");
+    } finally {
+      isLoadingDashboardRef.current = false;
     }
   }
 
   useEffect(() => {
     void loadDashboard();
+  }, []);
+
+  useEffect(() => {
+    const syncDashboard = () => {
+      if (document.visibilityState === "visible") {
+        void loadDashboard({ silent: true });
+      }
+    };
+
+    const timer = window.setInterval(syncDashboard, dashboardSyncIntervalMs);
+    document.addEventListener("visibilitychange", syncDashboard);
+    window.addEventListener("focus", syncDashboard);
+
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", syncDashboard);
+      window.removeEventListener("focus", syncDashboard);
+    };
   }, []);
 
   useEffect(() => {
@@ -443,7 +512,14 @@ function App() {
       await uploadTaskFile(assignmentTaskId, {
         file: assignmentFile,
         uploaderId: task?.studentId ?? "student",
-        uploaderRole: "student"
+        uploaderRole: "student",
+        compressImage: assignmentFile.type.startsWith("image/")
+          ? {
+              maxSide: 1600,
+              quality: 0.78,
+              minBytes: 180 * 1024
+            }
+          : false
       });
       await updateTask(assignmentTaskId, {
         status: "submitted"
@@ -476,15 +552,21 @@ function App() {
     setIsSavingCorrection(true);
 
     try {
-      await Promise.all(
-        correctionFiles.map((file) =>
-          uploadTaskFile(correctionTaskId, {
+      await runWithConcurrency(
+        correctionFiles,
+        3,
+        async (file) => {
+          await uploadTaskFile(correctionTaskId, {
             file,
             uploaderId: "u-assistant-chen",
             uploaderRole: "assistant",
-            compressImage: true
-          })
-        )
+            compressImage: {
+              maxSide: 2200,
+              quality: 0.88,
+              minBytes: 220 * 1024
+            }
+          });
+        }
       );
       await updateTask(correctionTaskId, {
         status: "reviewed",
@@ -847,7 +929,7 @@ function App() {
           >
             <strong>全部学生</strong>
           </button>
-          {dashboard.students.map((student) => (
+          {sortStudentsByGroup(dashboard.students).map((student) => (
             <StudentCard
               key={student.id}
               student={student}
@@ -1513,7 +1595,8 @@ function StudentPortal({
   onPreview: (file: TaskFile) => void;
   onBack: () => void;
 }) {
-  const selectedStudent = dashboard.students.find((student) => student.id === selectedStudentId) ?? dashboard.students[0];
+  const sortedStudents = sortStudentsByGroup(dashboard.students);
+  const selectedStudent = sortedStudents.find((student) => student.id === selectedStudentId) ?? sortedStudents[0];
   const selectedTasks = selectedStudent ? dashboard.tasks.filter((task) => task.studentId === selectedStudent.id) : [];
 
   return (
@@ -1538,13 +1621,14 @@ function StudentPortal({
             <ShieldCheck size={18} />
           </div>
           {dashboard.students.length === 0 && <p className="muted-copy">还没有学生档案，请先由老师添加。</p>}
-          {dashboard.students.map((student) => (
+          {sortedStudents.map((student) => (
             <button
               key={student.id}
               className={selectedStudent?.id === student.id ? "student-item active" : "student-item"}
               onClick={() => onStudentChange(student.id)}
             >
               <strong>{student.name}</strong>
+              <small>{student.group || "No group"}</small>
             </button>
           ))}
         </aside>
@@ -1800,6 +1884,7 @@ function StudentCard({
     <div className={active ? "student-item-wrap active" : "student-item-wrap"}>
       <button className="student-item" onClick={onSelect}>
         <strong>{student.name}</strong>
+        <small>{student.group || "No group"}</small>
       </button>
       <button className="delete-student-button" onClick={onDelete} aria-label={`删除学生 ${student.name}`}>
         <X size={14} />
@@ -1871,6 +1956,7 @@ function TaskFileGallery({
     <div className="file-sections">
       <FileSection
         title="作业 / 附件"
+        tone="assignment"
         files={assignmentFiles}
         emptyText={readOnly ? "暂未上传作业" : "暂无作业文件"}
         deletingFileId={deletingFileId}
@@ -1879,6 +1965,7 @@ function TaskFileGallery({
       />
       <FileSection
         title="批改照片"
+        tone="correction"
         files={correctionFiles}
         emptyText={readOnly ? "暂未上传批改" : "暂无批改照片"}
         deletingFileId={deletingFileId}
@@ -1890,6 +1977,7 @@ function TaskFileGallery({
 }
 
 function FileSection({
+  tone,
   title,
   files,
   emptyText,
@@ -1897,6 +1985,7 @@ function FileSection({
   onDelete,
   onPreview
 }: {
+  tone: "assignment" | "correction";
   title: string;
   files: TaskFile[];
   emptyText: string;
@@ -1910,7 +1999,7 @@ function FileSection({
   const bundleLabel = imageCount === files.length ? `${files.length} 张照片` : `${files.length} 个文件`;
 
   return (
-    <div className="file-section">
+    <div className={`file-section ${tone}`}>
       <strong>{title}</strong>
       <div className="file-stack">
         {files.length ? (
