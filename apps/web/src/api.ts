@@ -43,6 +43,13 @@ export function createStudent(input: CreateStudentInput) {
   });
 }
 
+export function updateStudent(studentId: string, input: { name?: string; group?: string }) {
+  return request<Student>(`/api/students/${studentId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input)
+  });
+}
+
 export function createTask(input: CreateTaskInput) {
   return request<Task>("/api/tasks", {
     method: "POST",
@@ -76,6 +83,16 @@ export async function deleteTask(taskId: string) {
 
 export async function deleteStudent(studentId: string) {
   const response = await fetch(`${apiBaseUrl}/api/students/${studentId}`, {
+    method: "DELETE"
+  });
+
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
+}
+
+export async function deleteStudentGroup(groupName: string) {
+  const response = await fetch(`${apiBaseUrl}/api/student-groups/${encodeURIComponent(groupName)}`, {
     method: "DELETE"
   });
 

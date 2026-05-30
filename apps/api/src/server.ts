@@ -112,13 +112,21 @@ app.use("/uploads", express.static(uploadDirectory));
 app.use("/exports", express.static(exportDirectory));
 
 const createStudentSchema = z.object({
-  name: z.string().min(2),
-  grade: z.string().min(1),
-  targetScore: z.number().min(0).max(9),
-  currentLevel: z.string().min(1),
-  group: z.string().min(1),
+  name: z.string().trim().min(1),
+  grade: z.string().default(""),
+  targetScore: z.number().min(0).max(9).default(0),
+  currentLevel: z.string().default(""),
+  group: z.string().trim().min(1),
   teacherId: z.string().min(1).default("u-teacher-lin"),
   assistantId: z.string().min(1).default("u-assistant-chen")
+});
+
+const updateStudentSchema = z.object({
+  name: z.string().trim().min(1).optional(),
+  grade: z.string().optional(),
+  targetScore: z.number().min(0).max(9).optional(),
+  currentLevel: z.string().optional(),
+  group: z.string().trim().min(1).optional()
 });
 
 const createTaskSchema = z.object({
@@ -481,6 +489,16 @@ app.get("/api/students", async (_req, res, next) => {
   }
 });
 
+async function deleteStudentWithTasks(studentId: string) {
+  const tasks = await all<TaskRow>("SELECT * FROM tasks WHERE studentId = ?", [studentId]);
+  for (const task of tasks) {
+    await run("DELETE FROM task_files WHERE taskId = ?", [task.id]);
+    await run("DELETE FROM parent_exports WHERE taskId = ?", [task.id]);
+    await run("DELETE FROM tasks WHERE id = ?", [task.id]);
+  }
+  await run("DELETE FROM students WHERE id = ?", [studentId]);
+}
+
 app.post("/api/students", async (req, res, next) => {
   try {
     const payload = createStudentSchema.parse(req.body);
@@ -514,6 +532,51 @@ app.post("/api/students", async (req, res, next) => {
   }
 });
 
+app.patch("/api/students/:studentId", async (req, res, next) => {
+  try {
+    const studentId = String(req.params.studentId);
+    const payload = updateStudentSchema.parse(req.body);
+    const existing = await get<StudentRow>(
+      "SELECT id, name, grade, targetScore, currentLevel, `group` AS `group`, teacherId, assistantId, createdAt, updatedAt FROM students WHERE id = ?",
+      [studentId]
+    );
+    if (!existing) {
+      res.status(404).json({ message: "Student not found" });
+      return;
+    }
+
+    await run(
+      "UPDATE students SET name = ?, grade = ?, targetScore = ?, currentLevel = ?, `group` = ?, updatedAt = ? WHERE id = ?",
+      [
+        payload.name ?? existing.name,
+        payload.grade ?? existing.grade,
+        payload.targetScore ?? existing.targetScore,
+        payload.currentLevel ?? existing.currentLevel,
+        payload.group ?? existing.group,
+        now(),
+        studentId
+      ]
+    );
+
+    if (payload.group && payload.group !== existing.group) {
+      await writeAuditLog({
+        action: "student_group_updated",
+        entityType: "student",
+        entityId: studentId,
+        detail: `${existing.name} moved from ${existing.group || "No group"} to ${payload.group}`
+      });
+    }
+
+    const student = await get<StudentRow>(
+      "SELECT id, name, grade, targetScore, currentLevel, `group` AS `group`, teacherId, assistantId, createdAt, updatedAt FROM students WHERE id = ?",
+      [studentId]
+    );
+    res.json(student);
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.delete("/api/students/:studentId", async (req, res, next) => {
   try {
     const studentId = String(req.params.studentId);
@@ -526,13 +589,36 @@ app.delete("/api/students/:studentId", async (req, res, next) => {
       return;
     }
 
-    const tasks = await all<TaskRow>("SELECT * FROM tasks WHERE studentId = ?", [studentId]);
-    for (const task of tasks) {
-      await run("DELETE FROM task_files WHERE taskId = ?", [task.id]);
-      await run("DELETE FROM parent_exports WHERE taskId = ?", [task.id]);
-      await run("DELETE FROM tasks WHERE id = ?", [task.id]);
+    await deleteStudentWithTasks(studentId);
+
+    res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/student-groups/:groupName", async (req, res, next) => {
+  try {
+    const groupName = String(req.params.groupName);
+    const students = await all<StudentRow>(
+      "SELECT id, name, grade, targetScore, currentLevel, `group` AS `group`, teacherId, assistantId, createdAt, updatedAt FROM students WHERE `group` = ?",
+      [groupName]
+    );
+    if (!students.length) {
+      res.status(404).json({ message: "Student group not found" });
+      return;
     }
-    await run("DELETE FROM students WHERE id = ?", [studentId]);
+
+    for (const student of students) {
+      await deleteStudentWithTasks(student.id);
+    }
+
+    await writeAuditLog({
+      action: "student_group_deleted",
+      entityType: "student_group",
+      entityId: groupName,
+      detail: `Deleted ${students.length} students from group ${groupName}`
+    });
 
     res.status(204).send();
   } catch (error) {

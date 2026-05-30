@@ -14,10 +14,7 @@ export interface Student {
   assistantId: string;
 }
 
-export type CreateStudentInput = Omit<Student, "id" | "teacherId" | "assistantId"> & {
-  teacherId?: string;
-  assistantId?: string;
-};
+export type CreateStudentInput = Pick<Student, "name" | "group">;
 
 export interface Task {
   id: string;

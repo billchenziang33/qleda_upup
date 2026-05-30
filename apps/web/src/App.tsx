@@ -27,11 +27,13 @@ import {
   deletePrintJob,
   createTask,
   deleteStudent,
+  deleteStudentGroup,
   deleteTask,
   deleteTaskFile,
   getDashboard,
   resolveApiUrl,
   updatePrintJob,
+  updateStudent,
   updateTask,
   uploadTaskFile
 } from "./api";
@@ -68,13 +70,9 @@ const typeLabels: Record<TaskType, string> = {
 
 const emptyStudentForm: CreateStudentInput = {
   name: "",
-  grade: "",
-  targetScore: 6.5,
-  currentLevel: "",
   group: ""
 };
 
-const ieltsScores = Array.from({ length: 19 }, (_, index) => (index * 0.5).toFixed(1).replace(".0", ""));
 const dashboardSyncIntervalMs = 4000;
 const dashboardInitialRetryDelaysMs = [0, 1500, 3000, 6000, 10000];
 
@@ -93,6 +91,15 @@ function sortStudentsByGroup(students: Student[]) {
     if (groupCompare !== 0) return groupCompare;
     return studentGroupCollator.compare(left.name, right.name);
   });
+}
+
+function groupStudentsByClass(students: Student[]) {
+  const groups = new Map<string, Student[]>();
+  sortStudentsByGroup(students).forEach((student) => {
+    const groupName = student.group?.trim() || "未分班";
+    groups.set(groupName, [...(groups.get(groupName) ?? []), student]);
+  });
+  return Array.from(groups, ([groupName, groupStudents]) => ({ groupName, students: groupStudents }));
 }
 
 const emptyTaskForm: CreateTaskInput = {
@@ -344,12 +351,6 @@ function App() {
   const [apiLoadProgress, setApiLoadProgress] = useState<ApiLoadProgress>(initialApiLoadProgress);
   const [isStudentFormOpen, setIsStudentFormOpen] = useState(false);
   const [studentForm, setStudentForm] = useState<CreateStudentInput>(emptyStudentForm);
-  const [studentScores, setStudentScores] = useState({
-    listening: "5.5",
-    reading: "5.5",
-    writing: "5.5",
-    speaking: "5.5"
-  });
   const [studentFormError, setStudentFormError] = useState("");
   const [isSavingStudent, setIsSavingStudent] = useState(false);
   const [isTaskFormOpen, setIsTaskFormOpen] = useState(false);
@@ -371,6 +372,8 @@ function App() {
   const [deleteStudentId, setDeleteStudentId] = useState<string | null>(null);
   const [deleteStudentError, setDeleteStudentError] = useState("");
   const [isDeletingStudent, setIsDeletingStudent] = useState(false);
+  const [expandedStudentGroups, setExpandedStudentGroups] = useState<Set<string>>(() => new Set());
+  const [deletingStudentGroup, setDeletingStudentGroup] = useState("");
   const [deletingFileId, setDeletingFileId] = useState<string | null>(null);
   const [isPrintQueueOpen, setIsPrintQueueOpen] = useState(false);
   const [printFile, setPrintFile] = useState<File | null>(null);
@@ -531,23 +534,11 @@ function App() {
     setIsSavingStudent(true);
 
     try {
-      const student = await createStudent({
-        ...studentForm,
-        targetScore: Number(studentForm.targetScore),
-        currentLevel: `Listening ${studentScores.listening} / Reading ${studentScores.reading} / Writing ${studentScores.writing} / Speaking ${studentScores.speaking}`,
-        teacherId: "u-teacher-lin",
-        assistantId: "u-assistant-chen"
-      });
+      const student = await createStudent(studentForm);
       await loadDashboard();
       setSelectedStudentId(student.id);
       setLocatedTaskId(null);
       setStudentForm(emptyStudentForm);
-      setStudentScores({
-        listening: "5.5",
-        reading: "5.5",
-        writing: "5.5",
-        speaking: "5.5"
-      });
       setIsStudentFormOpen(false);
     } catch {
       setStudentFormError("学生信息保存失败，请检查后端服务和表单内容。");
@@ -700,6 +691,52 @@ function App() {
       setDeleteStudentError("删除学生失败，请确认后端服务正常。");
     } finally {
       setIsDeletingStudent(false);
+    }
+  }
+
+  function toggleStudentGroup(groupName: string) {
+    setExpandedStudentGroups((current) => {
+      const next = new Set(current);
+      if (next.has(groupName)) {
+        next.delete(groupName);
+      } else {
+        next.add(groupName);
+      }
+      return next;
+    });
+  }
+
+  async function handleUpdateStudentGroup(studentId: string, groupName: string) {
+    try {
+      const updatedStudent = await updateStudent(studentId, { group: groupName });
+      setExpandedStudentGroups((current) => new Set(current).add(updatedStudent.group || "未分班"));
+      await loadDashboard();
+    } catch {
+      window.alert("修改学生班级失败，请确认后端服务正常。");
+    }
+  }
+
+  async function handleDeleteStudentGroup(groupName: string, count: number) {
+    if (!window.confirm(`确认删除「${groupName}」班级里的 ${count} 个学生吗？这些学生的任务、附件和家长导出记录也会一起删除。`)) return;
+    setDeletingStudentGroup(groupName);
+
+    try {
+      const selectedStudent = dashboardRef.current?.students.find((student) => student.id === selectedStudentId);
+      await deleteStudentGroup(groupName);
+      await loadDashboard();
+      setExpandedStudentGroups((current) => {
+        const next = new Set(current);
+        next.delete(groupName);
+        return next;
+      });
+      if (selectedStudent?.group === groupName) {
+        setSelectedStudentId("all");
+        setLocatedTaskId(null);
+      }
+    } catch {
+      window.alert("删除班级学生失败，请确认后端服务正常。");
+    } finally {
+      setDeletingStudentGroup("");
     }
   }
 
@@ -938,6 +975,7 @@ function App() {
     selectedStudentId === "all"
       ? dashboard.tasks
       : dashboard.tasks.filter((task) => task.studentId === selectedStudentId);
+  const studentGroups = groupStudentsByClass(dashboard.students);
   const visibleAuditLogs = isAuditExpanded ? dashboard.auditLogs : dashboard.auditLogs.slice(0, 5);
   return (
     <main className="app-shell">
@@ -1036,18 +1074,48 @@ function App() {
           >
             <strong>全部学生</strong>
           </button>
-          {sortStudentsByGroup(dashboard.students).map((student) => (
-            <StudentCard
-              key={student.id}
-              student={student}
-              active={student.id === selectedStudentId}
-              onSelect={() => {
-                setSelectedStudentId(student.id);
-                setLocatedTaskId(null);
-              }}
-              onDelete={() => setDeleteStudentId(student.id)}
-            />
-          ))}
+          <div className="student-group-list">
+            {studentGroups.map(({ groupName, students }) => {
+              const isExpanded = expandedStudentGroups.has(groupName) || students.some((student) => student.id === selectedStudentId);
+              return (
+                <section key={groupName} className="student-group">
+                  <div className="student-group-header">
+                    <button type="button" onClick={() => toggleStudentGroup(groupName)} aria-expanded={isExpanded}>
+                      <strong>{groupName}</strong>
+                      <small>{students.length} 个学生</small>
+                    </button>
+                    <button
+                      type="button"
+                      className="delete-student-button group-delete-button"
+                      onClick={() => void handleDeleteStudentGroup(groupName, students.length)}
+                      disabled={deletingStudentGroup === groupName}
+                      aria-label={`删除 ${groupName} 班级所有学生`}
+                    >
+                      <X size={15} />
+                    </button>
+                  </div>
+                  {isExpanded && (
+                    <div className="student-group-body">
+                      {students.map((student) => (
+                        <StudentCard
+                          key={student.id}
+                          student={student}
+                          active={student.id === selectedStudentId}
+                          groupOptions={studentGroups.map((group) => group.groupName)}
+                          onSelect={() => {
+                            setSelectedStudentId(student.id);
+                            setLocatedTaskId(null);
+                          }}
+                          onDelete={() => setDeleteStudentId(student.id)}
+                          onUpdateGroup={(groupName) => void handleUpdateStudentGroup(student.id, groupName)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </section>
+              );
+            })}
+          </div>
         </aside>
 
         <section className="task-board">
@@ -1197,53 +1265,7 @@ function App() {
               />
             </label>
             <label>
-              年级
-              <input
-                required
-                value={studentForm.grade}
-                onChange={(event) => setStudentForm({ ...studentForm, grade: event.target.value })}
-                placeholder="例如：高二 / 大一"
-              />
-            </label>
-            <label>
-              雅思目标分
-              <input
-                required
-                min="0"
-                max="9"
-                step="0.5"
-                type="number"
-                value={studentForm.targetScore}
-                onChange={(event) => setStudentForm({ ...studentForm, targetScore: Number(event.target.value) })}
-              />
-            </label>
-            <label>
-              当前水平
-              <div className="score-grid">
-                <ScoreSelect
-                  label="听力"
-                  value={studentScores.listening}
-                  onChange={(value) => setStudentScores({ ...studentScores, listening: value })}
-                />
-                <ScoreSelect
-                  label="阅读"
-                  value={studentScores.reading}
-                  onChange={(value) => setStudentScores({ ...studentScores, reading: value })}
-                />
-                <ScoreSelect
-                  label="写作"
-                  value={studentScores.writing}
-                  onChange={(value) => setStudentScores({ ...studentScores, writing: value })}
-                />
-                <ScoreSelect
-                  label="口语"
-                  value={studentScores.speaking}
-                  onChange={(value) => setStudentScores({ ...studentScores, speaking: value })}
-                />
-              </div>
-            </label>
-            <label>
-              分组
+              所在班级
               <input
                 required
                 value={studentForm.group}
@@ -1260,7 +1282,6 @@ function App() {
           </form>
         </div>
       )}
-
       {isTaskFormOpen && (
         <div className="modal-backdrop" role="presentation">
           <form className="student-form" onSubmit={(event) => void handleCreateTask(event)}>
@@ -1935,21 +1956,6 @@ function CommunicationPanel({
   );
 }
 
-function ScoreSelect({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
-  return (
-    <label className="score-select">
-      <span>{label}</span>
-      <select value={value} onChange={(event) => onChange(event.target.value)}>
-        {ieltsScores.map((score) => (
-          <option key={score} value={score}>
-            {score}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
 function Metric({
   icon,
   label,
@@ -1979,20 +1985,49 @@ function Metric({
 function StudentCard({
   student,
   active,
+  groupOptions,
   onSelect,
-  onDelete
+  onDelete,
+  onUpdateGroup
 }: {
   student: Student;
   active: boolean;
+  groupOptions: string[];
   onSelect: () => void;
   onDelete: () => void;
+  onUpdateGroup: (groupName: string) => void;
 }) {
+  const [groupDraft, setGroupDraft] = useState(student.group || "");
+
+  useEffect(() => {
+    setGroupDraft(student.group || "");
+  }, [student.group]);
+
+  const normalizedDraft = groupDraft.trim();
+  const canSaveGroup = normalizedDraft.length > 0 && normalizedDraft !== student.group;
+
   return (
     <div className={active ? "student-item-wrap active" : "student-item-wrap"}>
       <button className="student-item" onClick={onSelect}>
         <strong>{student.name}</strong>
-        <small>{student.group || "No group"}</small>
+        <small>{student.group || "未分班"}</small>
       </button>
+      <div className="student-group-editor">
+        <input
+          value={groupDraft}
+          list={`student-groups-${student.id}`}
+          onChange={(event) => setGroupDraft(event.target.value)}
+          aria-label={`修改 ${student.name} 的班级`}
+        />
+        <datalist id={`student-groups-${student.id}`}>
+          {groupOptions.map((groupName) => (
+            <option key={groupName} value={groupName} />
+          ))}
+        </datalist>
+        <button type="button" onClick={() => onUpdateGroup(normalizedDraft)} disabled={!canSaveGroup}>
+          保存班级
+        </button>
+      </div>
       <button className="delete-student-button" onClick={onDelete} aria-label={`删除学生 ${student.name}`}>
         <X size={14} />
       </button>
@@ -2176,3 +2211,4 @@ function FileSection({
 }
 
 export default App;
+

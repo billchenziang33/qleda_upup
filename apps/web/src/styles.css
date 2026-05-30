@@ -684,6 +684,58 @@ button.metric-card {
   margin-bottom: 8px;
 }
 
+.student-group-list {
+  display: grid;
+  gap: 10px;
+}
+
+.student-group {
+  border: 1px solid rgba(15, 118, 94, 0.12);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.38);
+  overflow: hidden;
+}
+
+.student-group-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+}
+
+.student-group-header > button:first-child {
+  min-height: 48px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 14px;
+  color: var(--green-dark);
+  background: rgba(220, 239, 227, 0.7);
+  display: grid;
+  gap: 3px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.student-group-header strong,
+.student-group-header small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.student-group-header small {
+  color: var(--muted);
+  font-weight: 850;
+}
+
+.student-group-body {
+  display: grid;
+  gap: 8px;
+  padding: 0 8px 8px;
+}
+
 .student-item {
   width: 100%;
   display: grid;
@@ -758,8 +810,47 @@ button.metric-card {
   transform: translateY(-50%);
 }
 
+.group-delete-button {
+  position: static;
+  transform: none;
+}
+
 .student-item-wrap .student-item {
   padding-right: 48px;
+}
+
+.student-group-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 7px;
+  padding-right: 42px;
+}
+
+.student-group-editor input {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid rgba(15, 118, 94, 0.16);
+  border-radius: 12px;
+  color: var(--green-dark);
+  background: rgba(255, 255, 255, 0.68);
+  outline: none;
+  font-weight: 850;
+}
+
+.student-group-editor button {
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 12px;
+  color: #fffdf5;
+  background: var(--green-dark);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.student-group-editor button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .delete-task-button {
@@ -779,6 +870,10 @@ button.metric-card {
 
 .delete-student-button:hover {
   transform: translateY(-50%) scale(1.06);
+}
+
+.group-delete-button:hover {
+  transform: scale(1.06);
 }
 
 .student-item small,
