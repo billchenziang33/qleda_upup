@@ -994,7 +994,7 @@ function App() {
       <section className="top-dashboard">
         <div className="top-dashboard-main">
           <section className="hero-card">
-            <div className="brand-title-wrap" aria-label="QLEDA">
+            <div className="brand-title-wrap" aria-label="QULEDA">
               <p className="brand-kicker">IELTS Teaching Operations</p>
               <h1 className="brand-title">
                 <span>Q</span>
@@ -1621,7 +1621,7 @@ function App() {
 
 function BrandWord() {
   return (
-    <div className="brand-title-wrap" aria-label="QLEDA">
+    <div className="brand-title-wrap" aria-label="QULEDA">
       <p className="brand-kicker">IELTS Teaching Operations</p>
       <h1 className="brand-title">
         <span>Q</span>
