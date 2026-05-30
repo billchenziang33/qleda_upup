@@ -121,6 +121,24 @@ function sanitizeDownloadFileName(value: string, fallback: string) {
 
 type PortalMode = "landing" | "teacher-login" | "teacher" | "student";
 
+type ApiLoadProgress = {
+  percent: number;
+  label: string;
+  detail: string;
+  attempt: number;
+  totalAttempts: number;
+  failed: boolean;
+};
+
+const initialApiLoadProgress: ApiLoadProgress = {
+  percent: 8,
+  label: "正在连接后端 API",
+  detail: "正在建立安全连接...",
+  attempt: 0,
+  totalAttempts: dashboardInitialRetryDelaysMs.length,
+  failed: false
+};
+
 function wrapCanvasText(context: CanvasRenderingContext2D, text: string, maxWidth: number) {
   const lines: string[] = [];
   let currentLine = "";
@@ -323,6 +341,7 @@ function App() {
   const [locatedTaskId, setLocatedTaskId] = useState<string | null>(null);
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [apiLoadProgress, setApiLoadProgress] = useState<ApiLoadProgress>(initialApiLoadProgress);
   const [isStudentFormOpen, setIsStudentFormOpen] = useState(false);
   const [studentForm, setStudentForm] = useState<CreateStudentInput>(emptyStudentForm);
   const [studentScores, setStudentScores] = useState({
@@ -375,11 +394,27 @@ function App() {
     if (isLoadingDashboardRef.current) return;
     isLoadingDashboardRef.current = true;
     const retryDelays = options.retryDelays ?? (options.silent ? [0] : dashboardInitialRetryDelaysMs);
+    const totalAttempts = retryDelays.length;
     try {
       for (let attempt = 0; attempt < retryDelays.length; attempt += 1) {
+        if (!options.silent && !dashboardRef.current) {
+          const attemptProgress = Math.min(88, 12 + Math.round((attempt / Math.max(1, totalAttempts)) * 72));
+          setApiLoadProgress({
+            percent: attemptProgress,
+            label: attempt === 0 ? "正在连接后端 API" : "后端 API 正在启动",
+            detail:
+              attempt === 0
+                ? "正在读取任务、学生和附件数据..."
+                : `第 ${attempt + 1} 次尝试连接，请稍等...`,
+            attempt,
+            totalAttempts,
+            failed: false
+          });
+        }
+
         if (retryDelays[attempt] > 0) {
           if (!options.silent && !dashboardRef.current) {
-            setError(`API is starting, retrying... (${attempt}/${retryDelays.length - 1})`);
+            setError(`后端 API 正在启动，正在重试... (${attempt}/${retryDelays.length - 1})`);
           }
           await wait(retryDelays[attempt]);
         } else if (!options.silent) {
@@ -388,6 +423,16 @@ function App() {
 
         try {
           const nextDashboard = await getDashboard();
+          if (!options.silent && !dashboardRef.current) {
+            setApiLoadProgress({
+              percent: 100,
+              label: "连接成功",
+              detail: "正在进入 QLEDA 教学任务中心...",
+              attempt,
+              totalAttempts,
+              failed: false
+            });
+          }
           dashboardRef.current = nextDashboard;
           setDashboard(nextDashboard);
           setError("");
@@ -398,7 +443,15 @@ function App() {
       }
     } catch {
       if (!options.silent || !dashboardRef.current) {
-        setError("API is still starting. Please wait a moment or refresh.");
+        setApiLoadProgress({
+          percent: 100,
+          label: "API 暂时无法连接",
+          detail: "请稍等片刻后刷新页面，或联系管理员检查后端服务。",
+          attempt: totalAttempts,
+          totalAttempts,
+          failed: true
+        });
+        setError("API 暂时无法连接，请稍等片刻后刷新。");
       }
     } finally {
       isLoadingDashboardRef.current = false;
@@ -813,8 +866,33 @@ function App() {
   if (!dashboard) {
     return (
       <main className="boot-screen">
-        <Loader2 className="spin" size={34} />
-        <p>{error || "正在连接 QLEDA 教学任务中心..."}</p>
+        <section className="api-loading-panel" aria-live="polite" aria-busy={!apiLoadProgress.failed}>
+          <div className="api-loading-icon">
+            <Loader2 className="spin" size={30} />
+          </div>
+          <div className="api-loading-copy">
+            <span>QLEDA API</span>
+            <h1>{apiLoadProgress.label}</h1>
+            <p>{apiLoadProgress.detail}</p>
+          </div>
+          <div className="api-progress-row">
+            <div
+              className={`api-progress-track${apiLoadProgress.failed ? " is-error" : ""}`}
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={apiLoadProgress.percent}
+              aria-label="API 加载进度"
+            >
+              <span style={{ width: `${apiLoadProgress.percent}%` }} />
+            </div>
+            <strong>{apiLoadProgress.percent}%</strong>
+          </div>
+          <small>
+            {error ||
+              `连接尝试 ${Math.min(apiLoadProgress.attempt + 1, apiLoadProgress.totalAttempts)} / ${apiLoadProgress.totalAttempts}`}
+          </small>
+        </section>
       </main>
     );
   }
