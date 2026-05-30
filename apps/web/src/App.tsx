@@ -998,6 +998,7 @@ function App() {
               <p className="brand-kicker">IELTS Teaching Operations</p>
               <h1 className="brand-title">
                 <span>Q</span>
+                  <span>U</span>
                 <span>L</span>
                 <span>E</span>
                 <span>D</span>
@@ -1625,6 +1626,7 @@ function BrandWord() {
       <p className="brand-kicker">IELTS Teaching Operations</p>
       <h1 className="brand-title">
         <span>Q</span>
+          <spam>U<span>
         <span>L</span>
         <span>E</span>
         <span>D</span>
