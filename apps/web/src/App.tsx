@@ -78,6 +78,10 @@ function sortStudentsByGroup(students: Student[]) {
   });
 }
 
+function sortTasksByLatest(tasks: Task[]) {
+  return [...tasks].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
+}
+
 function groupStudentsByClass(students: Student[]) {
   const groups = new Map<string, Student[]>();
   sortStudentsByGroup(students).forEach((student) => {
@@ -367,6 +371,7 @@ function App() {
   const [deletingPrintJobId, setDeletingPrintJobId] = useState<string | null>(null);
   const [previewFile, setPreviewFile] = useState<TaskFile | { name: string; url: string; fileType: string } | null>(null);
   const [isAuditExpanded, setIsAuditExpanded] = useState(false);
+  const [isTaskListExpanded, setIsTaskListExpanded] = useState(false);
   const [chatRole, setChatRole] = useState<"teacher" | "assistant">("teacher");
   const [chatText, setChatText] = useState("");
   const [chatError, setChatError] = useState("");
@@ -475,6 +480,10 @@ function App() {
     }, 80);
     return () => window.clearTimeout(timer);
   }, [locatedTaskId, selectedStudentId]);
+
+  useEffect(() => {
+    setIsTaskListExpanded(false);
+  }, [selectedStudentId]);
 
   function locateTask(taskId: string, studentId: string) {
     setSelectedStudentId(studentId);
@@ -956,6 +965,9 @@ function App() {
     selectedStudentId === "all"
       ? dashboard.tasks
       : dashboard.tasks.filter((task) => task.studentId === selectedStudentId);
+  const orderedSelectedStudentTasks = selectedStudentId === "all" ? selectedStudentTasks : sortTasksByLatest(selectedStudentTasks);
+  const visibleSelectedStudentTasks =
+    selectedStudentId === "all" || isTaskListExpanded ? orderedSelectedStudentTasks : orderedSelectedStudentTasks.slice(0, 3);
   const studentGroups = groupStudentsByClass(dashboard.students);
   const visibleAuditLogs = isAuditExpanded ? dashboard.auditLogs : dashboard.auditLogs.slice(0, 5);
   return (
@@ -1120,7 +1132,7 @@ function App() {
                 <span>可以新建任务，或者选择其他学生档案查看。</span>
               </div>
             )}
-            {selectedStudentTasks.map((task) => {
+            {visibleSelectedStudentTasks.map((task) => {
               const student = dashboard.students.find((item) => item.id === task.studentId);
               const files = dashboard.taskFiles.filter((file) => file.taskId === task.id);
               return (
@@ -1181,6 +1193,11 @@ function App() {
               );
             })}
           </div>
+          {selectedStudentId !== "all" && orderedSelectedStudentTasks.length > 3 && (
+            <button type="button" className="audit-toggle-button" onClick={() => setIsTaskListExpanded((current) => !current)}>
+              {isTaskListExpanded ? "收起任务" : `展开更多（${orderedSelectedStudentTasks.length - 3} 条）`}
+            </button>
+          )}
         </section>
       </section>
 
@@ -1668,9 +1685,15 @@ function StudentPortal({
   onPreview: (file: TaskFile) => void;
   onBack: () => void;
 }) {
+  const [isTaskListExpanded, setIsTaskListExpanded] = useState(false);
   const sortedStudents = sortStudentsByGroup(dashboard.students);
   const selectedStudent = sortedStudents.find((student) => student.id === selectedStudentId) ?? sortedStudents[0];
-  const selectedTasks = selectedStudent ? dashboard.tasks.filter((task) => task.studentId === selectedStudent.id) : [];
+  const selectedTasks = selectedStudent ? sortTasksByLatest(dashboard.tasks.filter((task) => task.studentId === selectedStudent.id)) : [];
+  const visibleSelectedTasks = isTaskListExpanded ? selectedTasks : selectedTasks.slice(0, 3);
+
+  useEffect(() => {
+    setIsTaskListExpanded(false);
+  }, [selectedStudentId]);
 
   return (
     <main className="app-shell student-portal-shell">
@@ -1738,7 +1761,7 @@ function StudentPortal({
                 <span>老师布置任务后，会自动出现在这里。</span>
               </div>
             )}
-            {selectedTasks.map((task) => {
+            {visibleSelectedTasks.map((task) => {
               const files = dashboard.taskFiles.filter((file) => file.taskId === task.id);
               return (
                 <article id={`student-task-${task.id}`} key={task.id} className="task-card student-task-card">
@@ -1767,6 +1790,11 @@ function StudentPortal({
               );
             })}
           </div>
+          {selectedTasks.length > 3 && (
+            <button type="button" className="audit-toggle-button" onClick={() => setIsTaskListExpanded((current) => !current)}>
+              {isTaskListExpanded ? "收起任务" : `展开更多（${selectedTasks.length - 3} 条）`}
+            </button>
+          )}
         </section>
       </section>
     </main>
