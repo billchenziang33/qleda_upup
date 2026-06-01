@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+﻿import { FormEvent, useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   BookOpenCheck,
@@ -870,13 +870,29 @@ function App() {
 
   function handleCorrectionFilesChange(files: FileList | null) {
     const selectedFiles = Array.from(files ?? []);
-    if (selectedFiles.length > 9) {
-      setCorrectionFiles([]);
-      setCorrectionError("一次最多只能上传 9 张批改照片，请重新选择。");
-      return;
-    }
-    setCorrectionError("");
-    setCorrectionFiles(selectedFiles);
+    if (selectedFiles.length === 0) return;
+
+    setCorrectionFiles((current) => {
+      const nextFiles = [...current];
+      selectedFiles.forEach((file) => {
+        const duplicate = nextFiles.some(
+          (item) => item.name === file.name && item.size === file.size && item.lastModified === file.lastModified
+        );
+        if (!duplicate) nextFiles.push(file);
+      });
+
+      if (nextFiles.length > 9) {
+        setCorrectionError("一次最多只能上传 9 张批改照片，请删减后再提交。");
+        return nextFiles.slice(0, 9);
+      }
+
+      setCorrectionError("");
+      return nextFiles;
+    });
+  }
+
+  function removeCorrectionFile(index: number) {
+    setCorrectionFiles((current) => current.filter((_, itemIndex) => itemIndex !== index));
   }
 
   function handleTeacherLogin(event: FormEvent<HTMLFormElement>) {
@@ -1497,7 +1513,22 @@ function App() {
                 onChange={(event) => handleCorrectionFilesChange(event.target.files)}
               />
             </label>
-            {correctionFiles.length > 0 && <p className="form-context">已选择 {correctionFiles.length} 张批改照片</p>}
+            <p className="form-context">可以一次选择多张，也可以分几次补选，最后统一提交。最多 9 张。</p>
+            {correctionFiles.length > 0 && (
+              <>
+                <p className="form-context">已选择 {correctionFiles.length} 张批改照片</p>
+                <div className="selected-file-list">
+                  {correctionFiles.map((file, index) => (
+                    <div key={`${file.name}-${file.lastModified}-${index}`} className="selected-file-item">
+                      <span title={file.name}>{file.name}</span>
+                      <button type="button" className="selected-file-remove" onClick={() => removeCorrectionFile(index)}>
+                        删除
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
             <label>
               批改备注
               <textarea

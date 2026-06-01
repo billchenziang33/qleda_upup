@@ -252,6 +252,7 @@ p {
   position: relative;
   width: fit-content;
   margin: 0;
+  white-space: nowrap;
   color: var(--green-dark);
   font-size: clamp(5.4rem, 13.5vw, 13.4rem);
   font-weight: 1000;
@@ -283,6 +284,53 @@ p {
 .brand-title span:nth-child(4) {
   color: #145545;
   transform: translateY(0.055em) skewX(-8deg);
+}
+
+.top-dashboard .brand-title {
+  font-size: clamp(4.1rem, 8.1vw, 9rem);
+  letter-spacing: -0.115em;
+}
+
+.selected-file-list {
+  display: grid;
+  gap: 10px;
+  margin: 10px 0 14px;
+}
+
+.selected-file-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid rgba(15, 118, 94, 0.14);
+  border-radius: 16px;
+  background: rgba(230, 242, 237, 0.72);
+}
+
+.selected-file-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--green-dark);
+  font-weight: 700;
+}
+
+.selected-file-remove {
+  flex: 0 0 auto;
+  border: none;
+  border-radius: 999px;
+  background: rgba(7, 63, 52, 0.08);
+  color: var(--green-dark);
+  padding: 8px 14px;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.selected-file-remove:hover {
+  background: rgba(7, 63, 52, 0.14);
 }
 
 .brand-subtitle {
