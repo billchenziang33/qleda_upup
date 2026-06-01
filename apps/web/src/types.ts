@@ -35,9 +35,6 @@ export interface Task {
 export type CreateTaskInput = {
   studentId: string;
   title: string;
-  type: TaskType;
-  priority: Priority;
-  dueDate: string;
   description: string;
   pinned: boolean;
 };
