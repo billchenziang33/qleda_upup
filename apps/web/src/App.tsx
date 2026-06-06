@@ -5,39 +5,44 @@ import {
   Camera,
   CheckCircle2,
   ClipboardList,
+  Download,
+  Files,
   GraduationCap,
   ImageDown,
   Loader2,
   LockKeyhole,
-  MessageCircle,
   Plus,
-  Send,
+  Printer,
+  Settings,
   ShieldCheck,
   Sparkles,
+  Trash2,
   UploadCloud,
   UserRound,
   UsersRound,
   X
 } from "lucide-react";
 import {
-  createChatMessage,
   createPrintJob,
+  createSharedFile,
   createStudent,
-  deleteChatMessage,
+  deleteTeacherGroup,
   deletePrintJob,
+  deleteSharedFile,
   createTask,
   deleteStudent,
-  deleteStudentGroup,
   deleteTask,
   deleteTaskFile,
   getDashboard,
   resolveApiUrl,
+  renameTeacherGroup,
+  updateTeacherName,
   updatePrintJob,
   updateStudent,
   updateTask,
   uploadTaskFile
 } from "./api";
-import type { ChatMessage, CreateStudentInput, CreateTaskInput, DashboardData, Student, Task, TaskFile, TaskStatus } from "./types";
+import type { CreateStudentInput, CreateTaskInput, DashboardData, SharedFile, Student, Task, TaskFile, TaskStatus } from "./types";
 
 const statusLabels: Record<TaskStatus, string> = {
   not_started: "未开始",
@@ -55,7 +60,8 @@ const printStatusLabels: Record<string, string> = {
 
 const emptyStudentForm: CreateStudentInput = {
   name: "",
-  group: ""
+  group: "",
+  teacherName: ""
 };
 
 const dashboardSyncIntervalMs = 4000;
@@ -82,13 +88,37 @@ function sortTasksByLatest(tasks: Task[]) {
   return [...tasks].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
 }
 
-function groupStudentsByClass(students: Student[]) {
-  const groups = new Map<string, Student[]>();
-  sortStudentsByGroup(students).forEach((student) => {
-    const groupName = student.group?.trim() || "未分班";
-    groups.set(groupName, [...(groups.get(groupName) ?? []), student]);
-  });
-  return Array.from(groups, ([groupName, groupStudents]) => ({ groupName, students: groupStudents }));
+function groupStudentsByTeacher(students: Student[]) {
+  const teachers = new Map<string, { teacherId: string; teacherName: string; groups: Map<string, Student[]> }>();
+  [...students]
+    .sort((left, right) => {
+      const teacherCompare = studentGroupCollator.compare(left.teacherName || "", right.teacherName || "");
+      if (teacherCompare !== 0) return teacherCompare;
+      const groupCompare = studentGroupCollator.compare(left.group || "", right.group || "");
+      if (groupCompare !== 0) return groupCompare;
+      return studentGroupCollator.compare(left.name, right.name);
+    })
+    .forEach((student) => {
+      const teacherId = student.teacherId;
+      const teacherName = student.teacherName?.trim() || "未分配老师";
+      const groupName = student.group?.trim() || "未分班";
+      const teacherEntry = teachers.get(teacherId) ?? {
+        teacherId,
+        teacherName,
+        groups: new Map<string, Student[]>()
+      };
+      teacherEntry.groups.set(groupName, [...(teacherEntry.groups.get(groupName) ?? []), student]);
+      teachers.set(teacherId, teacherEntry);
+    });
+
+  return Array.from(teachers.values()).map((teacher) => ({
+    teacherId: teacher.teacherId,
+    teacherName: teacher.teacherName,
+    groups: Array.from(teacher.groups, ([groupName, groupStudents]) => ({
+      groupName,
+      students: groupStudents
+    }))
+  }));
 }
 
 const emptyTaskForm: CreateTaskInput = {
@@ -112,7 +142,7 @@ function sanitizeDownloadFileName(value: string, fallback: string) {
   return clean || fallback;
 }
 
-type PortalMode = "landing" | "teacher-login" | "teacher" | "student";
+type PortalMode = "landing" | "teacher" | "student";
 
 type ApiLoadProgress = {
   percent: number;
@@ -327,8 +357,6 @@ async function downloadParentFeedbackPng(input: {
 function App() {
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [portalMode, setPortalMode] = useState<PortalMode>("landing");
-  const [teacherPassword, setTeacherPassword] = useState("");
-  const [teacherLoginError, setTeacherLoginError] = useState("");
   const [studentPortalId, setStudentPortalId] = useState("");
   const [selectedStudentId, setSelectedStudentId] = useState("all");
   const [locatedTaskId, setLocatedTaskId] = useState<string | null>(null);
@@ -358,25 +386,24 @@ function App() {
   const [deleteStudentId, setDeleteStudentId] = useState<string | null>(null);
   const [deleteStudentError, setDeleteStudentError] = useState("");
   const [isDeletingStudent, setIsDeletingStudent] = useState(false);
+  const [expandedTeachers, setExpandedTeachers] = useState<Set<string>>(() => new Set());
   const [expandedStudentGroups, setExpandedStudentGroups] = useState<Set<string>>(() => new Set());
   const [deletingStudentGroup, setDeletingStudentGroup] = useState("");
   const [deletingFileId, setDeletingFileId] = useState<string | null>(null);
-  const [isPrintQueueOpen, setIsPrintQueueOpen] = useState(false);
   const [printFile, setPrintFile] = useState<File | null>(null);
-  const [printRequester, setPrintRequester] = useState("");
   const [printCopies, setPrintCopies] = useState(1);
   const [printNote, setPrintNote] = useState("");
   const [printError, setPrintError] = useState("");
+  const [isPrintFormOpen, setIsPrintFormOpen] = useState(false);
   const [isSavingPrintJob, setIsSavingPrintJob] = useState(false);
   const [deletingPrintJobId, setDeletingPrintJobId] = useState<string | null>(null);
   const [previewFile, setPreviewFile] = useState<TaskFile | { name: string; url: string; fileType: string } | null>(null);
+  const [sharedFileUpload, setSharedFileUpload] = useState<File | null>(null);
+  const [sharedFileError, setSharedFileError] = useState("");
+  const [isSavingSharedFile, setIsSavingSharedFile] = useState(false);
+  const [deletingSharedFileId, setDeletingSharedFileId] = useState<string | null>(null);
   const [isAuditExpanded, setIsAuditExpanded] = useState(false);
   const [isTaskListExpanded, setIsTaskListExpanded] = useState(false);
-  const [chatRole, setChatRole] = useState<"teacher" | "assistant">("teacher");
-  const [chatText, setChatText] = useState("");
-  const [chatError, setChatError] = useState("");
-  const [isSendingChat, setIsSendingChat] = useState(false);
-  const [deletingChatMessageId, setDeletingChatMessageId] = useState<string | null>(null);
   const dashboardRef = useRef<DashboardData | null>(null);
   const isLoadingDashboardRef = useRef(false);
 
@@ -527,6 +554,8 @@ function App() {
     try {
       const student = await createStudent(studentForm);
       await loadDashboard();
+      setExpandedTeachers((current) => new Set(current).add(student.teacherId));
+      setExpandedStudentGroups((current) => new Set(current).add(`${student.teacherId}::${student.group || "未分班"}`));
       setSelectedStudentId(student.id);
       setLocatedTaskId(null);
       setStudentForm(emptyStudentForm);
@@ -696,30 +725,83 @@ function App() {
     });
   }
 
+  function toggleTeacher(teacherId: string) {
+    setExpandedTeachers((current) => {
+      const next = new Set(current);
+      if (next.has(teacherId)) {
+        next.delete(teacherId);
+      } else {
+        next.add(teacherId);
+      }
+      return next;
+    });
+  }
+
+  function clearSelectedStudent() {
+    setSelectedStudentId("all");
+    setLocatedTaskId(null);
+  }
+
   async function handleUpdateStudentGroup(studentId: string, groupName: string) {
     try {
       const updatedStudent = await updateStudent(studentId, { group: groupName });
-      setExpandedStudentGroups((current) => new Set(current).add(updatedStudent.group || "未分班"));
+      setExpandedStudentGroups((current) => new Set(current).add(`${updatedStudent.teacherId}::${updatedStudent.group || "未分班"}`));
+      setExpandedTeachers((current) => new Set(current).add(updatedStudent.teacherId));
       await loadDashboard();
     } catch {
       window.alert("修改学生班级失败，请确认后端服务正常。");
     }
   }
 
-  async function handleDeleteStudentGroup(groupName: string, count: number) {
+  async function handleRenameTeacher(teacherId: string, nextTeacherName: string) {
+    try {
+      await updateTeacherName(teacherId, { name: nextTeacherName });
+      setExpandedTeachers((current) => new Set(current).add(teacherId));
+      await loadDashboard();
+    } catch {
+      window.alert("修改老师名字失败，请确认后端服务正常。");
+    }
+  }
+
+  async function handleRenameTeacherGroup(teacherId: string, currentGroupName: string, nextGroupName: string) {
+    try {
+      await renameTeacherGroup(teacherId, { currentGroupName, nextGroupName });
+      setExpandedTeachers((current) => new Set(current).add(teacherId));
+      setExpandedStudentGroups((current) => {
+        const next = new Set(current);
+        next.delete(`${teacherId}::${currentGroupName}`);
+        next.add(`${teacherId}::${nextGroupName}`);
+        return next;
+      });
+      await loadDashboard();
+    } catch {
+      window.alert("修改班级名字失败，请确认后端服务正常。");
+    }
+  }
+
+  async function handleRenameStudent(studentId: string, nextStudentName: string) {
+    try {
+      await updateStudent(studentId, { name: nextStudentName });
+      await loadDashboard();
+    } catch {
+      window.alert("修改学生名字失败，请确认后端服务正常。");
+    }
+  }
+
+  async function handleDeleteStudentGroup(teacherId: string, groupName: string, count: number) {
     if (!window.confirm(`确认删除「${groupName}」班级里的 ${count} 个学生吗？这些学生的任务、附件和家长导出记录也会一起删除。`)) return;
-    setDeletingStudentGroup(groupName);
+    setDeletingStudentGroup(`${teacherId}::${groupName}`);
 
     try {
       const selectedStudent = dashboardRef.current?.students.find((student) => student.id === selectedStudentId);
-      await deleteStudentGroup(groupName);
+      await deleteTeacherGroup(teacherId, groupName);
       await loadDashboard();
       setExpandedStudentGroups((current) => {
         const next = new Set(current);
-        next.delete(groupName);
+        next.delete(`${teacherId}::${groupName}`);
         return next;
       });
-      if (selectedStudent?.group === groupName) {
+      if (selectedStudent?.teacherId === teacherId && selectedStudent.group === groupName) {
         setSelectedStudentId("all");
         setLocatedTaskId(null);
       }
@@ -757,15 +839,16 @@ function App() {
     try {
       await createPrintJob({
         file: printFile,
-        requester: printRequester,
+        requester: "打印队列",
         copies: Number(printCopies),
         note: printNote
       });
       await loadDashboard();
       setPrintFile(null);
-      setPrintRequester("");
       setPrintCopies(1);
       setPrintNote("");
+      setIsPrintFormOpen(false);
+      openPrintQueue();
     } catch {
       setPrintError("打印文件上传失败，请检查文件、份数和后端服务。");
     } finally {
@@ -787,15 +870,6 @@ function App() {
     }
   }
 
-  async function handleTaskStatusChange(taskId: string, status: TaskStatus) {
-    try {
-      await updateTask(taskId, { status });
-      await loadDashboard();
-    } catch {
-      window.alert("任务状态更新失败，请确认后端服务正常。");
-    }
-  }
-
   async function handlePrintStatusChange(jobId: string, status: "pending" | "printed" | "cancelled") {
     try {
       await updatePrintJob(jobId, { status });
@@ -805,44 +879,52 @@ function App() {
     }
   }
 
-  async function handleSendChatMessage(event: FormEvent<HTMLFormElement>) {
+  async function handleCreateSharedFile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const message = chatText.trim();
-    if (!message) {
-      setChatError("请输入沟通内容。");
+    if (!sharedFileUpload) {
+      setSharedFileError("请先选择一个需要放进常用文件框的文件。");
       return;
     }
 
-    setChatError("");
-    setIsSendingChat(true);
+    setSharedFileError("");
+    setIsSavingSharedFile(true);
 
     try {
-      await createChatMessage({
-        authorRole: chatRole,
-        authorName: chatRole === "teacher" ? "老师" : "助教",
-        message
+      await createSharedFile({
+        file: sharedFileUpload,
+        uploaderId: "u-shared-file",
+        uploaderRole: "teacher",
+        uploaderName: "老师 / 助教",
+        note: ""
       });
-      setChatText("");
+      setSharedFileUpload(null);
       await loadDashboard();
     } catch {
-      setChatError("消息发送失败，请确认后端服务正常。");
+      setSharedFileError("常用文件上传失败，请确认文件和后端服务正常。");
     } finally {
-      setIsSendingChat(false);
+      setIsSavingSharedFile(false);
     }
   }
 
-  async function handleDeleteChatMessage(messageId: string) {
-    if (!window.confirm("确认删除这条沟通消息吗？删除后数据库记录也会同步移除。")) return;
-    setDeletingChatMessageId(messageId);
+  async function handleDeleteSharedFile(sharedFileId: string) {
+    if (!window.confirm("确认删除这个常用文件吗？删除后其他助教将无法再下载或加入打印队列。")) return;
+    setDeletingSharedFileId(sharedFileId);
 
     try {
-      await deleteChatMessage(messageId);
+      await deleteSharedFile(sharedFileId);
       await loadDashboard();
     } catch {
-      window.alert("删除沟通消息失败，请确认后端服务正常。");
+      window.alert("删除常用文件失败，请确认后端服务正常。");
     } finally {
-      setDeletingChatMessageId(null);
+      setDeletingSharedFileId(null);
     }
+  }
+
+  function openPrintQueue() {
+    document.getElementById("print-queue-panel")?.scrollIntoView({
+      behavior: "smooth",
+      block: "start"
+    });
   }
 
   function openTaskForm() {
@@ -895,17 +977,6 @@ function App() {
     setCorrectionFiles((current) => current.filter((_, itemIndex) => itemIndex !== index));
   }
 
-  function handleTeacherLogin(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (teacherPassword === "qleda123456") {
-      setTeacherLoginError("");
-      setTeacherPassword("");
-      setPortalMode("teacher");
-      return;
-    }
-    setTeacherLoginError("密码不正确，请重新输入。");
-  }
-
   if (!dashboard) {
     return (
       <main className="boot-screen">
@@ -943,23 +1014,7 @@ function App() {
   const correctionTask = correctionTaskId ? dashboard.tasks.find((task) => task.id === correctionTaskId) : undefined;
 
   if (portalMode === "landing") {
-    return <LandingPortal onTeacher={() => setPortalMode("teacher-login")} onStudent={() => setPortalMode("student")} />;
-  }
-
-  if (portalMode === "teacher-login") {
-    return (
-      <TeacherLoginPortal
-        password={teacherPassword}
-        error={teacherLoginError}
-        onPasswordChange={setTeacherPassword}
-        onSubmit={handleTeacherLogin}
-        onBack={() => {
-          setTeacherLoginError("");
-          setTeacherPassword("");
-          setPortalMode("landing");
-        }}
-      />
-    );
+    return <LandingPortal onTeacher={() => setPortalMode("teacher")} onStudent={() => setPortalMode("student")} />;
   }
 
   if (portalMode === "student") {
@@ -984,7 +1039,7 @@ function App() {
   const orderedSelectedStudentTasks = selectedStudentId === "all" ? selectedStudentTasks : sortTasksByLatest(selectedStudentTasks);
   const visibleSelectedStudentTasks =
     selectedStudentId === "all" || isTaskListExpanded ? orderedSelectedStudentTasks : orderedSelectedStudentTasks.slice(0, 3);
-  const studentGroups = groupStudentsByClass(dashboard.students);
+  const teacherGroups = groupStudentsByTeacher(dashboard.students);
   const visibleAuditLogs = isAuditExpanded ? dashboard.auditLogs : dashboard.auditLogs.slice(0, 5);
   return (
     <main className="app-shell">
@@ -993,8 +1048,6 @@ function App() {
         className="portal-return-button"
         onClick={() => {
           setPortalMode("landing");
-          setTeacherLoginError("");
-          setTeacherPassword("");
         }}
       >
         <ArrowLeft size={16} />
@@ -1015,7 +1068,7 @@ function App() {
               </h1>
               <p className="brand-subtitle">Teaching task flow</p>
             </div>
-            <div className="hero-panel">
+            <div className="hero-panel teacher-hero-panel">
               <Sparkles size={28} />
               <strong>今日重点</strong>
               <span>{dashboard.summary.pendingReview} 个任务等待批改，{dashboard.summary.pendingPrintJobs} 个文件在打印队列中。</span>
@@ -1042,27 +1095,37 @@ function App() {
               onClick={locatePendingReviewTask}
             />
             <Metric
-              icon={<Camera />}
-              label="需要打印的文件队列"
+              icon={<Printer />}
+              label="打印队列"
               value={dashboard.summary.pendingPrintJobs}
-              helper="上传文件并备注份数/姓名或门牌号"
-              onClick={() => setIsPrintQueueOpen(true)}
-              tone="print"
+              helper="添加打印文件"
+              onClick={() => {
+                setPrintError("");
+                setIsPrintFormOpen(true);
+              }}
             />
           </div>
         </div>
-        <CommunicationPanel
-          messages={dashboard.chatMessages}
-          role={chatRole}
-          text={chatText}
-          error={chatError}
-          isSending={isSendingChat}
-          onRoleChange={setChatRole}
-          onTextChange={setChatText}
-          onSubmit={handleSendChatMessage}
-          deletingMessageId={deletingChatMessageId}
-          onDeleteMessage={(messageId) => void handleDeleteChatMessage(messageId)}
-        />
+        <div className="top-dashboard-side">
+          <SharedFilesPanel
+            files={dashboard.sharedFiles}
+            error={sharedFileError}
+            uploadFile={sharedFileUpload}
+            isSaving={isSavingSharedFile}
+            deletingFileId={deletingSharedFileId}
+            onFileChange={setSharedFileUpload}
+            onSubmit={handleCreateSharedFile}
+            onPreview={(file) => setPreviewFile({ name: file.fileName, url: file.fileUrl, fileType: file.fileType })}
+            onDelete={(sharedFileId) => void handleDeleteSharedFile(sharedFileId)}
+          />
+          <PrintQueuePanel
+            jobs={dashboard.printJobs}
+            deletingPrintJobId={deletingPrintJobId}
+            pendingCount={dashboard.summary.pendingPrintJobs}
+            onStatusChange={(jobId, status) => void handlePrintStatusChange(jobId, status)}
+            onDelete={(jobId) => void handleDeletePrintJob(jobId)}
+          />
+        </div>
       </section>
 
       <section className="workspace">
@@ -1085,41 +1148,82 @@ function App() {
             <strong>全部学生</strong>
           </button>
           <div className="student-group-list">
-            {studentGroups.map(({ groupName, students }) => {
-              const isExpanded = expandedStudentGroups.has(groupName) || students.some((student) => student.id === selectedStudentId);
+            {teacherGroups.map(({ teacherId, teacherName, groups }) => {
+              const teacherExpanded = expandedTeachers.has(teacherId) || groups.some(({ students }) => students.some((student) => student.id === selectedStudentId));
               return (
-                <section key={groupName} className="student-group">
-                  <div className="student-group-header">
-                    <button type="button" onClick={() => toggleStudentGroup(groupName)} aria-expanded={isExpanded}>
-                      <strong>{groupName}</strong>
-                      <small>{students.length} 个学生</small>
-                    </button>
-                    <button
-                      type="button"
-                      className="delete-student-button group-delete-button"
-                      onClick={() => void handleDeleteStudentGroup(groupName, students.length)}
-                      disabled={deletingStudentGroup === groupName}
-                      aria-label={`删除 ${groupName} 班级所有学生`}
-                    >
-                      <X size={15} />
-                    </button>
-                  </div>
-                  {isExpanded && (
-                    <div className="student-group-body">
-                      {students.map((student) => (
-                        <StudentCard
-                          key={student.id}
-                          student={student}
-                          active={student.id === selectedStudentId}
-                          groupOptions={studentGroups.map((group) => group.groupName)}
-                          onSelect={() => {
-                            setSelectedStudentId(student.id);
-                            setLocatedTaskId(null);
-                          }}
-                          onDelete={() => setDeleteStudentId(student.id)}
-                          onUpdateGroup={(groupName) => void handleUpdateStudentGroup(student.id, groupName)}
-                        />
-                      ))}
+                <section key={teacherId} className="student-group teacher-group">
+                  <TeacherFolderRow
+                    teacherName={teacherName}
+                    studentCount={groups.reduce((total, group) => total + group.students.length, 0)}
+                    expanded={teacherExpanded}
+                    onToggle={() => {
+                      const hasSelectedStudentInTeacher = groups.some(({ students }) => students.some((student) => student.id === selectedStudentId));
+                      if (teacherExpanded && hasSelectedStudentInTeacher) {
+                        clearSelectedStudent();
+                        return;
+                      }
+                      toggleTeacher(teacherId);
+                    }}
+                    onRename={(nextTeacherName) => void handleRenameTeacher(teacherId, nextTeacherName)}
+                  />
+                  {teacherExpanded && (
+                    <div className="student-group-body teacher-group-body">
+                      {groups.map(({ groupName, students }) => {
+                        const groupKey = `${teacherId}::${groupName}`;
+                        const isExpanded = expandedStudentGroups.has(groupKey) || students.some((student) => student.id === selectedStudentId);
+                        return (
+                          <section key={groupKey} className="student-group nested-group">
+                            <div className="student-group-header">
+                              <GroupFolderRow
+                                groupName={groupName}
+                                studentCount={students.length}
+                                expanded={isExpanded}
+                                onToggle={() => {
+                                  const hasSelectedStudentInGroup = students.some((student) => student.id === selectedStudentId);
+                                  if (isExpanded && hasSelectedStudentInGroup) {
+                                    clearSelectedStudent();
+                                    return;
+                                  }
+                                  toggleStudentGroup(groupKey);
+                                }}
+                                onRename={(nextGroupName) => void handleRenameTeacherGroup(teacherId, groupName, nextGroupName)}
+                              />
+                              <button
+                                type="button"
+                                className="delete-student-button group-delete-button"
+                                onClick={() => void handleDeleteStudentGroup(teacherId, groupName, students.length)}
+                                disabled={deletingStudentGroup === groupKey}
+                                aria-label={`删除 ${groupName} 班级所有学生`}
+                              >
+                                <X size={15} />
+                              </button>
+                            </div>
+                            {isExpanded && (
+                              <div className="student-group-body">
+                                {students.map((student) => (
+                                  <StudentCard
+                                    key={student.id}
+                                    student={student}
+                                    active={student.id === selectedStudentId}
+                                    groupOptions={groups.map((group) => group.groupName)}
+                                    onSelect={() => {
+                                      if (selectedStudentId === student.id) {
+                                        clearSelectedStudent();
+                                        return;
+                                      }
+                                      setSelectedStudentId(student.id);
+                                      setLocatedTaskId(null);
+                                    }}
+                                    onDelete={() => setDeleteStudentId(student.id)}
+                                    onUpdateGroup={(groupName) => void handleUpdateStudentGroup(student.id, groupName)}
+                                    onRename={(nextStudentName) => void handleRenameStudent(student.id, nextStudentName)}
+                                  />
+                                ))}
+                              </div>
+                            )}
+                          </section>
+                        );
+                      })}
                     </div>
                   )}
                 </section>
@@ -1132,7 +1236,7 @@ function App() {
           <div className="board-header">
             <div>
               <p className="eyebrow">Task Queue</p>
-              <h2>任务队列</h2>
+              <h2>{selectedStudentId === "all" ? "任务队列" : `任务队列--${dashboard.students.find((student) => student.id === selectedStudentId)?.name ?? ""}`}</h2>
               <p className="board-hint">助教可以在任务卡片中上传批改后的作业，并把任务状态更新为已批改。</p>
             </div>
             <button className="primary-action" onClick={openTaskForm}>
@@ -1149,7 +1253,6 @@ function App() {
               </div>
             )}
             {visibleSelectedStudentTasks.map((task) => {
-              const student = dashboard.students.find((item) => item.id === task.studentId);
               const files = dashboard.taskFiles.filter((file) => file.taskId === task.id);
               return (
                 <article
@@ -1161,27 +1264,8 @@ function App() {
                     <X size={16} />
                   </button>
                   <div className="task-main">
-                    <div className="task-title-row">
-                      {task.pinned && <span className="pin">老师置顶</span>}
-                      <span className="status">{statusLabels[task.status]}</span>
-                      {locatedTaskId === task.id && <span className="located-badge">已定位</span>}
-                    </div>
                     <h3>{task.title}</h3>
                     {task.description && <p>{task.description}</p>}
-                    <div className="task-meta">
-                      <span>{student?.name}</span>
-                      {task.score && <span>{task.score}</span>}
-                    </div>
-                    <label className="inline-status-control">
-                      任务状态
-                      <select value={task.status} onChange={(event) => void handleTaskStatusChange(task.id, event.target.value as TaskStatus)}>
-                        {Object.entries(statusLabels).map(([value, label]) => (
-                          <option key={value} value={value}>
-                            {label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
                     <TeacherNoteEditor task={task} onSave={loadDashboard} />
                   </div>
 
@@ -1254,6 +1338,53 @@ function App() {
         <FilePreviewModal file={previewFile} onClose={() => setPreviewFile(null)} />
       )}
 
+      {isPrintFormOpen && (
+        <div className="modal-backdrop" role="presentation">
+          <form className="student-form print-job-form" onSubmit={(event) => void handleCreatePrintJob(event)}>
+            <div className="form-header">
+              <div>
+                <p className="eyebrow">Print Queue</p>
+                <h2>添加打印文件</h2>
+              </div>
+              <button type="button" className="icon-button" onClick={() => setIsPrintFormOpen(false)}>
+                <X size={18} />
+              </button>
+            </div>
+
+            <label>
+              打印文件
+              <input
+                required
+                type="file"
+                accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.ppt,.pptx"
+                onChange={(event) => setPrintFile(event.target.files?.[0] ?? null)}
+              />
+            </label>
+            <label>
+              打印份数
+              <input
+                required
+                min="1"
+                max="200"
+                type="number"
+                value={printCopies}
+                onChange={(event) => setPrintCopies(Number(event.target.value))}
+              />
+            </label>
+            <label>
+              打印备注
+              <textarea value={printNote} onChange={(event) => setPrintNote(event.target.value)} placeholder="例如：双面打印 / 彩印 / 下课前拿走" />
+            </label>
+
+            {printError && <p className="form-error">{printError}</p>}
+
+            <button className="submit-button" type="submit" disabled={isSavingPrintJob}>
+              {isSavingPrintJob ? "添加中..." : "加入打印队列"}
+            </button>
+          </form>
+        </div>
+      )}
+
       {isStudentFormOpen && (
         <div className="modal-backdrop" role="presentation">
           <form className="student-form" onSubmit={(event) => void handleCreateStudent(event)}>
@@ -1283,6 +1414,15 @@ function App() {
                 value={studentForm.group}
                 onChange={(event) => setStudentForm({ ...studentForm, group: event.target.value })}
                 placeholder="例如：VIP 一对一 / 写作班"
+              />
+            </label>
+            <label>
+              所属老师
+              <input
+                required
+                value={studentForm.teacherName}
+                onChange={(event) => setStudentForm({ ...studentForm, teacherName: event.target.value })}
+                placeholder="例如：Lily 老师"
               />
             </label>
 
@@ -1355,108 +1495,6 @@ function App() {
           </form>
         </div>
       )}
-      {isPrintQueueOpen && (
-        <div className="modal-backdrop" role="presentation">
-          <div className="student-form print-queue-modal">
-            <div className="form-header">
-              <div>
-                <p className="eyebrow">Print Queue</p>
-                <h2>需要打印的文件队列</h2>
-              </div>
-              <button type="button" className="icon-button" onClick={() => setIsPrintQueueOpen(false)}>
-                <X size={18} />
-              </button>
-            </div>
-
-            <form className="print-job-form" onSubmit={(event) => void handleCreatePrintJob(event)}>
-              <label>
-                打印文件
-                <input
-                  required
-                  type="file"
-                  accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.ppt,.pptx"
-                  onChange={(event) => setPrintFile(event.target.files?.[0] ?? null)}
-                />
-              </label>
-              <label>
-                姓名 / 教室门牌号
-                <input
-                  required
-                  value={printRequester}
-                  onChange={(event) => setPrintRequester(event.target.value)}
-                  placeholder="例如：Anna / A203"
-                />
-              </label>
-              <label>
-                打印份数
-                <input
-                  required
-                  min="1"
-                  max="200"
-                  type="number"
-                  value={printCopies}
-                  onChange={(event) => setPrintCopies(Number(event.target.value))}
-                />
-              </label>
-              <label>
-                打印备注
-                <textarea
-                  value={printNote}
-                  onChange={(event) => setPrintNote(event.target.value)}
-                  placeholder="例如：双面打印 / 课前送到 301 / 彩印"
-                />
-              </label>
-
-              {printError && <p className="form-error">{printError}</p>}
-
-              <button className="submit-button" type="submit" disabled={isSavingPrintJob}>
-                {isSavingPrintJob ? "加入队列中..." : "加入打印队列"}
-              </button>
-            </form>
-
-            <div className="print-job-list">
-              <strong>当前待打印</strong>
-              {dashboard.printJobs.length ? (
-                dashboard.printJobs.map((job) => (
-                  <div key={job.id} className="print-job-row">
-                    <button
-                      type="button"
-                      className="delete-print-job-button"
-                      onClick={() => void handleDeletePrintJob(job.id)}
-                      disabled={deletingPrintJobId === job.id}
-                      aria-label={`删除打印文件 ${job.fileName}`}
-                    >
-                      <X size={13} />
-                    </button>
-                    <div className="print-job-item">
-                      <span>{job.fileName}</span>
-                      <em>{job.requester}</em>
-                      <b>{job.copies} 份</b>
-                      <select
-                        value={job.status}
-                        onChange={(event) => void handlePrintStatusChange(job.id, event.target.value as "pending" | "printed" | "cancelled")}
-                      >
-                        {Object.entries(printStatusLabels).map(([value, label]) => (
-                          <option key={value} value={value}>
-                            {label}
-                          </option>
-                        ))}
-                      </select>
-                      <a className="preview-print-button" href={resolveApiUrl(job.fileUrl)} download={job.fileName}>
-                        Download
-                      </a>
-                      {job.note && <small>{job.note}</small>}
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <p className="muted-copy">当前没有待打印文件。</p>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
       {assignmentTaskId && (
         <div className="modal-backdrop" role="presentation">
           <form className="student-form" onSubmit={(event) => void handleUploadAssignment(event)}>
@@ -1641,7 +1679,7 @@ function LandingPortal({ onTeacher, onStudent }: { onTeacher: () => void; onStud
             <button className="portal-action-card teacher" onClick={onTeacher}>
               <LockKeyhole size={26} />
               <strong>老师入口</strong>
-              <span>需要输入管理密码</span>
+              <span>直接进入完整教学后台</span>
             </button>
             <button className="portal-action-card student" onClick={onStudent}>
               <UserRound size={26} />
@@ -1870,89 +1908,151 @@ function FilePreviewModal({
   );
 }
 
-function CommunicationPanel({
-  messages,
-  role,
-  text,
+function SharedFilesPanel({
+  files,
   error,
-  isSending,
-  onRoleChange,
-  onTextChange,
+  uploadFile,
+  isSaving,
+  deletingFileId,
+  onFileChange,
   onSubmit,
-  deletingMessageId,
-  onDeleteMessage
+  onPreview,
+  onDelete
 }: {
-  messages: ChatMessage[];
-  role: "teacher" | "assistant";
-  text: string;
+  files: SharedFile[];
   error: string;
-  isSending: boolean;
-  onRoleChange: (role: "teacher" | "assistant") => void;
-  onTextChange: (value: string) => void;
+  uploadFile: File | null;
+  isSaving: boolean;
+  deletingFileId: string | null;
+  onFileChange: (file: File | null) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
-  deletingMessageId: string | null;
-  onDeleteMessage: (messageId: string) => void;
+  onPreview: (file: SharedFile) => void;
+  onDelete: (sharedFileId: string) => void;
 }) {
-  const latestMessages = messages.slice(-6);
-  const threadRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    const thread = threadRef.current;
-    if (!thread) return;
-    thread.scrollTop = thread.scrollHeight;
-  }, [latestMessages.length, latestMessages.at(-1)?.id]);
-
   return (
-    <aside className="communication-card">
+    <aside className="communication-card shared-files-panel">
       <div className="communication-heading">
         <div>
-          <span>老师 / 助教沟通</span>
-          <strong>需求对话框</strong>
+          <span>老师 / 助教共享</span>
+          <strong>常用文件框</strong>
         </div>
-        <MessageCircle size={22} />
+        <Files size={22} />
       </div>
 
-      <div className="chat-thread" ref={threadRef}>
-        {latestMessages.length ? (
-          latestMessages.map((message) => (
-            <article key={message.id} className={`chat-message ${message.authorRole}`}>
-              <button
-                type="button"
-                className="delete-chat-message-button"
-                onClick={() => onDeleteMessage(message.id)}
-                disabled={deletingMessageId === message.id}
-                aria-label="删除沟通消息"
-              >
-                {deletingMessageId === message.id ? <Loader2 className="spin" size={12} /> : <X size={12} />}
-              </button>
-              <div className="chat-message-meta">
-                <strong>{message.authorName}</strong>
-                <time>{formatDateTime(message.createdAt)}</time>
+      <div className="chat-thread shared-file-thread">
+        {files.length ? (
+          files.map((file) => (
+            <article key={file.id} className={`shared-file-card ${file.uploaderRole}`}>
+              <div className="shared-file-meta">
+                <div>
+                  <strong>{file.fileName}</strong>
+                  <small>
+                    {file.uploaderName} · {formatDateTime(file.createdAt)}
+                  </small>
+                </div>
+                <button
+                  type="button"
+                  className="delete-chat-message-button"
+                  onClick={() => onDelete(file.id)}
+                  disabled={deletingFileId === file.id}
+                  aria-label="删除常用文件"
+                >
+                  {deletingFileId === file.id ? <Loader2 className="spin" size={12} /> : <Trash2 size={12} />}
+                </button>
               </div>
-              <p>{message.message}</p>
+              <div className="shared-file-actions">
+                <button type="button" onClick={() => onPreview(file)}>
+                  预览
+                </button>
+                <a href={resolveApiUrl(file.fileUrl)} target="_blank" rel="noreferrer">
+                  <Download size={14} />
+                  下载
+                </a>
+              </div>
             </article>
           ))
         ) : (
-          <p className="chat-empty">还没有沟通记录，可以在这里同步批改、打印或课程安排需求。</p>
+          <p className="chat-empty">还没有常用文件，老师或助教可以把讲义、模板、打印材料先放进来。</p>
         )}
       </div>
 
-      <form className="chat-form" onSubmit={onSubmit}>
-        <div className="chat-role-toggle" aria-label="选择发送身份">
-          <button type="button" className={role === "teacher" ? "active" : ""} onClick={() => onRoleChange("teacher")}>
-            老师
-          </button>
-          <button type="button" className={role === "assistant" ? "active" : ""} onClick={() => onRoleChange("assistant")}>
-            助教
-          </button>
-        </div>
-        <textarea value={text} onChange={(event) => onTextChange(event.target.value)} />
+      <form className="shared-file-upload-form" onSubmit={onSubmit}>
+        <label className="shared-file-picker">
+          <input type="file" onChange={(event) => onFileChange(event.target.files?.[0] ?? null)} />
+          <span>{uploadFile ? uploadFile.name : "添加文件"}</span>
+        </label>
         {error && <p className="form-error">{error}</p>}
-        <button className="chat-send-button" type="submit" disabled={isSending}>
-          {isSending ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
-          发送
+        <button className="chat-send-button" type="submit" disabled={isSaving}>
+          {isSaving ? <Loader2 className="spin" size={16} /> : <UploadCloud size={16} />}
+          存入常用文件框
         </button>
       </form>
+    </aside>
+  );
+}
+
+function PrintQueuePanel({
+  jobs,
+  deletingPrintJobId,
+  pendingCount,
+  onStatusChange,
+  onDelete
+}: {
+  jobs: DashboardData["printJobs"];
+  deletingPrintJobId: string | null;
+  pendingCount: number;
+  onStatusChange: (jobId: string, status: "pending" | "printed" | "cancelled") => void;
+  onDelete: (jobId: string) => void;
+}) {
+  return (
+    <aside id="print-queue-panel" className="communication-card print-queue-card">
+      <div className="communication-heading">
+        <div>
+          <span>打印管理</span>
+          <strong>需要打印的文件队列</strong>
+        </div>
+        <div className="panel-count-badge">{pendingCount}</div>
+      </div>
+
+      <div className="chat-thread print-queue-thread">
+        {jobs.length ? (
+          jobs.map((job) => (
+            <article key={job.id} className="shared-file-card print-job-card">
+              <div className="shared-file-meta">
+                <div>
+                  <strong>{job.fileName}</strong>
+                  <small>{formatDateTime(job.createdAt)}</small>
+                </div>
+                <button
+                  type="button"
+                  className="delete-chat-message-button"
+                  onClick={() => onDelete(job.id)}
+                  disabled={deletingPrintJobId === job.id}
+                  aria-label={`删除打印文件 ${job.fileName}`}
+                >
+                  {deletingPrintJobId === job.id ? <Loader2 className="spin" size={12} /> : <Trash2 size={12} />}
+                </button>
+              </div>
+              <div className="print-job-detail-row">
+                <b>{job.copies} 份</b>
+                <select value={job.status} onChange={(event) => onStatusChange(job.id, event.target.value as "pending" | "printed" | "cancelled")}>
+                  {Object.entries(printStatusLabels).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+                <a className="preview-print-button" href={resolveApiUrl(job.fileUrl)} download={job.fileName}>
+                  下载
+                </a>
+              </div>
+              {job.note && <p>{job.note}</p>}
+            </article>
+          ))
+        ) : (
+          <p className="chat-empty">当前没有待打印文件。</p>
+        )}
+      </div>
     </aside>
   );
 }
@@ -1983,13 +2083,114 @@ function Metric({
   );
 }
 
+function TeacherFolderRow({
+  teacherName,
+  studentCount,
+  expanded,
+  onToggle,
+  onRename
+}: {
+  teacherName: string;
+  studentCount: number;
+  expanded: boolean;
+  onToggle: () => void;
+  onRename: (nextTeacherName: string) => void;
+}) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [draft, setDraft] = useState(teacherName);
+
+  useEffect(() => {
+    setDraft(teacherName);
+  }, [teacherName]);
+
+  return (
+    <div className="teacher-folder-row">
+      <button type="button" className="teacher-folder-button" onClick={onToggle} aria-expanded={expanded}>
+        <strong>{teacherName}</strong>
+        <small>{studentCount} 个学生</small>
+      </button>
+      <button type="button" className="settings-button" onClick={() => setIsEditing((current) => !current)} aria-label={`修改 ${teacherName} 名字`}>
+        <Settings size={14} />
+      </button>
+      {isEditing && (
+        <div className="inline-edit-row">
+          <input value={draft} onChange={(event) => setDraft(event.target.value)} aria-label={`修改 ${teacherName} 名字`} />
+          <button
+            type="button"
+            onClick={() => {
+              const nextTeacherName = draft.trim();
+              if (!nextTeacherName || nextTeacherName === teacherName) return;
+              onRename(nextTeacherName);
+              setIsEditing(false);
+            }}
+            disabled={!draft.trim() || draft.trim() === teacherName}
+          >
+            保存
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GroupFolderRow({
+  groupName,
+  studentCount,
+  expanded,
+  onToggle,
+  onRename
+}: {
+  groupName: string;
+  studentCount: number;
+  expanded: boolean;
+  onToggle: () => void;
+  onRename: (nextGroupName: string) => void;
+}) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [draft, setDraft] = useState(groupName);
+
+  useEffect(() => {
+    setDraft(groupName);
+  }, [groupName]);
+
+  return (
+    <div className="teacher-folder-row group-folder-row">
+      <button type="button" className="teacher-folder-button" onClick={onToggle} aria-expanded={expanded}>
+        <strong>{groupName}</strong>
+        <small>{studentCount} 个学生</small>
+      </button>
+      <button type="button" className="settings-button" onClick={() => setIsEditing((current) => !current)} aria-label={`修改 ${groupName} 班级名字`}>
+        <Settings size={14} />
+      </button>
+      {isEditing && (
+        <div className="inline-edit-row">
+          <input value={draft} onChange={(event) => setDraft(event.target.value)} aria-label={`修改 ${groupName} 班级名字`} />
+          <button
+            type="button"
+            onClick={() => {
+              const nextGroupName = draft.trim();
+              if (!nextGroupName || nextGroupName === groupName) return;
+              onRename(nextGroupName);
+              setIsEditing(false);
+            }}
+            disabled={!draft.trim() || draft.trim() === groupName}
+          >
+            保存
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function StudentCard({
   student,
   active,
   groupOptions,
   onSelect,
   onDelete,
-  onUpdateGroup
+  onUpdateGroup,
+  onRename
 }: {
   student: Student;
   active: boolean;
@@ -1997,38 +2198,71 @@ function StudentCard({
   onSelect: () => void;
   onDelete: () => void;
   onUpdateGroup: (groupName: string) => void;
+  onRename: (nextStudentName: string) => void;
 }) {
   const [groupDraft, setGroupDraft] = useState(student.group || "");
+  const [nameDraft, setNameDraft] = useState(student.name);
+  const [isEditing, setIsEditing] = useState(false);
 
   useEffect(() => {
     setGroupDraft(student.group || "");
-  }, [student.group]);
+    setNameDraft(student.name);
+  }, [student.group, student.name]);
 
   const normalizedDraft = groupDraft.trim();
   const canSaveGroup = normalizedDraft.length > 0 && normalizedDraft !== student.group;
 
   return (
     <div className={active ? "student-item-wrap active" : "student-item-wrap"}>
-      <button className="student-item" onClick={onSelect}>
-        <strong>{student.name}</strong>
-        <small>{student.group || "未分班"}</small>
-      </button>
-      <div className="student-group-editor">
-        <input
-          value={groupDraft}
-          list={`student-groups-${student.id}`}
-          onChange={(event) => setGroupDraft(event.target.value)}
-          aria-label={`修改 ${student.name} 的班级`}
-        />
-        <datalist id={`student-groups-${student.id}`}>
-          {groupOptions.map((groupName) => (
-            <option key={groupName} value={groupName} />
-          ))}
-        </datalist>
-        <button type="button" onClick={() => onUpdateGroup(normalizedDraft)} disabled={!canSaveGroup}>
-          保存班级
+      <div className="teacher-folder-row student-folder-row">
+        <button className="student-item" onClick={onSelect}>
+          <strong>{student.name}</strong>
+          <small>{student.group || "未分班"}</small>
+        </button>
+        <button
+          className="settings-button student-settings-button"
+          type="button"
+          onClick={() => setIsEditing((current) => !current)}
+          aria-label={`修改学生 ${student.name} 信息`}
+        >
+          <Settings size={14} />
         </button>
       </div>
+      {isEditing && (
+        <>
+          <div className="inline-edit-row student-name-edit">
+            <input value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} aria-label={`修改学生 ${student.name} 名字`} />
+            <button
+              type="button"
+              onClick={() => {
+                const nextStudentName = nameDraft.trim();
+                if (!nextStudentName || nextStudentName === student.name) return;
+                onRename(nextStudentName);
+                setIsEditing(false);
+              }}
+              disabled={!nameDraft.trim() || nameDraft.trim() === student.name}
+            >
+              保存姓名
+            </button>
+          </div>
+          <div className="student-group-editor">
+            <input
+              value={groupDraft}
+              list={`student-groups-${student.id}`}
+              onChange={(event) => setGroupDraft(event.target.value)}
+              aria-label={`修改 ${student.name} 的班级`}
+            />
+            <datalist id={`student-groups-${student.id}`}>
+              {groupOptions.map((groupName) => (
+                <option key={groupName} value={groupName} />
+              ))}
+            </datalist>
+            <button type="button" onClick={() => onUpdateGroup(normalizedDraft)} disabled={!canSaveGroup}>
+              保存班级
+            </button>
+          </div>
+        </>
+      )}
       <button className="delete-student-button" onClick={onDelete} aria-label={`删除学生 ${student.name}`}>
         <X size={14} />
       </button>
@@ -2039,24 +2273,28 @@ function StudentCard({
 function TeacherNoteEditor({ task, onSave }: { task: Task; onSave: () => Promise<void> }) {
   const [note, setNote] = useState(task.teacherComment ?? "");
   const [isSaving, setIsSaving] = useState(false);
-  const [isEditing, setIsEditing] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saved" | "error">("idle");
+  const initialSyncDoneRef = useRef(false);
+  const lastSavedNoteRef = useRef(task.teacherComment ?? "");
 
   useEffect(() => {
-    if (!isEditing && !isSaving) {
+    if (!isSaving) {
       setNote(task.teacherComment ?? "");
+      lastSavedNoteRef.current = task.teacherComment ?? "";
       setSaveStatus("idle");
     }
-  }, [isEditing, isSaving, task.id, task.teacherComment]);
+    initialSyncDoneRef.current = true;
+  }, [isSaving, task.id, task.teacherComment]);
 
-  async function handleSave() {
+  async function handleSave(nextNote: string) {
     setIsSaving(true);
     setSaveStatus("idle");
     try {
-      const savedTask = await updateTask(task.id, { teacherComment: note });
-      setNote(savedTask.teacherComment ?? "");
+      const savedTask = await updateTask(task.id, { teacherComment: nextNote });
+      const savedNote = savedTask.teacherComment ?? "";
+      setNote(savedNote);
+      lastSavedNoteRef.current = savedNote;
       await onSave();
-      setIsEditing(false);
       setSaveStatus("saved");
     } catch {
       setSaveStatus("error");
@@ -2066,6 +2304,17 @@ function TeacherNoteEditor({ task, onSave }: { task: Task; onSave: () => Promise
     }
   }
 
+  useEffect(() => {
+    if (!initialSyncDoneRef.current) return;
+    if (note === lastSavedNoteRef.current) return;
+
+    const timer = window.setTimeout(() => {
+      void handleSave(note);
+    }, 700);
+
+    return () => window.clearTimeout(timer);
+  }, [note]);
+
   return (
     <div className="teacher-note-editor">
       <label>
@@ -2073,7 +2322,6 @@ function TeacherNoteEditor({ task, onSave }: { task: Task; onSave: () => Promise
         <textarea
           value={note}
           onChange={(event) => {
-            setIsEditing(true);
             setSaveStatus("idle");
             setNote(event.target.value);
           }}
@@ -2081,9 +2329,7 @@ function TeacherNoteEditor({ task, onSave }: { task: Task; onSave: () => Promise
         />
       </label>
       <div className="teacher-note-actions">
-        <button type="button" onClick={() => void handleSave()} disabled={isSaving}>
-          {isSaving ? "保存中..." : "保存备注"}
-        </button>
+        {isSaving && <small>保存中...</small>}
         {saveStatus === "saved" && <small>已保存</small>}
         {saveStatus === "error" && <small className="error">保存失败</small>}
       </div>

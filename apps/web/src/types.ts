@@ -11,10 +11,11 @@ export interface Student {
   currentLevel: string;
   group: string;
   teacherId: string;
+  teacherName: string;
   assistantId: string;
 }
 
-export type CreateStudentInput = Pick<Student, "name" | "group">;
+export type CreateStudentInput = Pick<Student, "name" | "group" | "teacherName">;
 
 export interface Task {
   id: string;
@@ -89,6 +90,19 @@ export interface ChatMessage {
   createdAt: string;
 }
 
+export interface SharedFile {
+  id: string;
+  uploaderId: string;
+  uploaderRole: "teacher" | "assistant" | string;
+  uploaderName: string;
+  note: string;
+  fileName: string;
+  fileType: string;
+  fileUrl: string;
+  fileSize?: number;
+  createdAt: string;
+}
+
 export interface DashboardData {
   students: Student[];
   tasks: Task[];
@@ -97,6 +111,7 @@ export interface DashboardData {
   printJobs: PrintJob[];
   auditLogs: AuditLog[];
   chatMessages: ChatMessage[];
+  sharedFiles: SharedFile[];
   summary: {
     studentCount: number;
     activeTasks: number;

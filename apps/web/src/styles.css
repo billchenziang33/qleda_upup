@@ -375,11 +375,28 @@ p {
   line-height: 1.75;
 }
 
+.teacher-hero-panel {
+  min-height: 168px;
+  max-width: 420px;
+  margin-left: auto;
+  padding: 22px 24px;
+  justify-self: end;
+}
+
+.teacher-hero-panel strong {
+  font-size: 1.28rem;
+}
+
+.teacher-hero-panel span {
+  font-size: 0.92rem;
+  line-height: 1.6;
+}
+
 .top-dashboard {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 380px;
   gap: 18px;
-  align-items: start;
+  align-items: stretch;
   min-height: 0;
 }
 
@@ -403,7 +420,17 @@ p {
 }
 
 .top-dashboard-main .metric-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   margin-top: 0;
+  min-height: 0;
+}
+
+.top-dashboard-side {
+  display: grid;
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  height: 430px;
+  align-self: start;
   min-height: 0;
 }
 
@@ -496,19 +523,18 @@ button.metric-card {
 }
 
 .communication-card {
-  height: 560px;
+  height: 440px;
   min-height: 0;
-  max-height: 560px;
+  max-height: 440px;
   overflow: hidden;
-  border-radius: 30px;
-  padding: 22px;
+  border-radius: 24px;
+  padding: 18px;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  gap: 14px;
+  gap: 12px;
   background:
-    radial-gradient(circle at 92% 0%, rgba(15, 118, 94, 0.22), transparent 11rem),
-    linear-gradient(150deg, rgba(255, 250, 239, 0.94), rgba(235, 248, 239, 0.82));
-  box-shadow: 0 24px 64px rgba(15, 118, 94, 0.14);
+    linear-gradient(180deg, rgba(255, 252, 245, 0.94), rgba(244, 249, 242, 0.9));
+  box-shadow: 0 18px 44px rgba(15, 118, 94, 0.1);
 }
 
 .communication-heading {
@@ -521,27 +547,27 @@ button.metric-card {
 
 .communication-heading div {
   display: grid;
-  gap: 4px;
+  gap: 2px;
 }
 
 .communication-heading span {
   color: var(--green);
-  font-size: 0.72rem;
-  font-weight: 950;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
+  font-size: 0.84rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .communication-heading strong {
   color: var(--ink);
-  font-size: 1.35rem;
-  letter-spacing: -0.04em;
+  font-size: 1.05rem;
+  letter-spacing: 0;
 }
 
 .chat-thread {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   min-height: 0;
   height: 100%;
   overflow-y: auto;
@@ -636,62 +662,283 @@ button.metric-card {
   display: grid;
   gap: 10px;
   min-height: 0;
+  max-height: 172px;
+  overflow-y: auto;
+  padding: 12px;
+  padding-right: 8px;
+  border-top: 1px solid rgba(15, 118, 94, 0.08);
+  background: rgba(255, 255, 255, 0.42);
+  border-radius: 18px;
+}
+
+.shared-files-panel .chat-form,
+.print-panel-form {
+  min-height: 172px;
+  align-content: start;
 }
 
 .chat-role-toggle {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  padding: 4px;
+  gap: 6px;
+  padding: 3px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.56);
-  border: 1px solid rgba(15, 118, 94, 0.12);
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(15, 118, 94, 0.08);
 }
 
 .chat-role-toggle button {
   border: 0;
   border-radius: 999px;
+  min-height: 38px;
   padding: 8px 10px;
   color: var(--muted);
   background: transparent;
   cursor: pointer;
-  font-weight: 950;
+  font-weight: 800;
 }
 
 .chat-role-toggle button.active {
   color: #fffdf5;
-  background: linear-gradient(135deg, var(--green), var(--green-dark));
-  box-shadow: 0 10px 22px rgba(15, 118, 94, 0.2);
+  background: var(--green-dark);
+  box-shadow: none;
 }
 
 .chat-form textarea {
-  height: 76px;
-  min-height: 76px;
-  max-height: 76px;
+  height: 72px;
+  min-height: 72px;
+  max-height: 72px;
   resize: none;
-  border-radius: 18px;
+  border-radius: 14px;
   padding: 12px 14px;
+  border: 1px solid rgba(15, 118, 94, 0.14);
+  background: rgba(255, 255, 255, 0.92);
   overflow-y: auto;
 }
 
 .chat-send-button {
   border: 0;
   border-radius: 999px;
-  padding: 12px 16px;
+  min-height: 42px;
+  padding: 10px 14px;
   color: #fffdf5;
-  background: linear-gradient(135deg, var(--green), var(--green-dark));
+  background: var(--green-dark);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
   cursor: pointer;
-  font-weight: 950;
-  box-shadow: 0 16px 34px rgba(15, 118, 94, 0.2);
+  font-weight: 850;
+  box-shadow: none;
 }
 
 .chat-send-button:disabled {
   cursor: not-allowed;
   opacity: 0.7;
+}
+
+.top-dashboard-side .communication-card {
+  height: 100%;
+  min-height: 0;
+  max-height: 100%;
+}
+
+.shared-file-thread {
+  gap: 8px;
+}
+
+.shared-file-thread::before,
+.print-queue-thread::before {
+  display: none;
+}
+
+.shared-file-card {
+  display: grid;
+  gap: 7px;
+  padding: 10px 12px;
+  border: 1px solid rgba(15, 118, 94, 0.1);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: none;
+}
+
+.shared-file-card.assistant {
+  background: rgba(246, 250, 247, 0.96);
+  border-color: rgba(15, 118, 94, 0.16);
+}
+
+.shared-file-meta {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.shared-file-meta div {
+  display: grid;
+  gap: 4px;
+}
+
+.shared-file-meta strong {
+  color: var(--ink);
+  font-size: 0.9rem;
+  line-height: 1.3;
+  word-break: break-word;
+}
+
+.shared-file-meta small {
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.shared-file-card p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.84rem;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.shared-file-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.shared-file-actions button,
+.shared-file-actions a {
+  border: 1px solid rgba(15, 118, 94, 0.14);
+  border-radius: 999px;
+  min-height: 28px;
+  padding: 5px 10px;
+  color: var(--green-dark);
+  background: rgba(255, 255, 255, 0.92);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  text-decoration: none;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.shared-file-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.shared-file-picker {
+  position: relative;
+  border: 1px dashed rgba(15, 118, 94, 0.24);
+  border-radius: 14px;
+  min-height: 38px;
+  padding: 9px 12px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--ink);
+  font-size: 0.84rem;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.shared-file-picker input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.shared-file-picker span {
+  display: block;
+  color: var(--muted);
+  font-weight: 700;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.shared-file-upload-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(15, 118, 94, 0.08);
+}
+
+.shared-file-upload-form .form-error {
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+.print-queue-card {
+  background:
+    linear-gradient(180deg, rgba(255, 251, 242, 0.94), rgba(246, 249, 240, 0.92));
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.panel-count-badge {
+  min-width: 30px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--green-dark);
+  color: #fffdf5;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 850;
+}
+
+.print-panel-form {
+  padding-bottom: 12px;
+}
+
+.print-inline-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.print-inline-fields label {
+  display: grid;
+  gap: 6px;
+  color: var(--ink);
+  font-size: 0.84rem;
+  font-weight: 800;
+}
+
+.print-inline-fields input {
+  min-height: 40px;
+  padding: 10px 12px;
+  border: 1px solid rgba(15, 118, 94, 0.14);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.print-queue-thread {
+  padding-top: 2px;
+}
+
+.print-job-card {
+  gap: 8px;
+}
+
+.print-job-detail-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.print-job-detail-row b {
+  color: var(--green-dark);
+  font-size: 0.8rem;
+}
+
+.print-job-detail-row select {
+  min-width: 112px;
+  border-radius: 999px;
+  padding: 7px 11px;
+  border: 1px solid rgba(15, 118, 94, 0.14);
+  background: rgba(255, 255, 255, 0.92);
 }
 
 .workspace {
@@ -744,6 +991,10 @@ button.metric-card {
   overflow: hidden;
 }
 
+.teacher-group {
+  padding: 8px;
+}
+
 .student-group-header {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -782,6 +1033,89 @@ button.metric-card {
   display: grid;
   gap: 8px;
   padding: 0 8px 8px;
+}
+
+.teacher-group-body {
+  padding: 8px 0 0;
+}
+
+.nested-group {
+  background: rgba(247, 251, 246, 0.72);
+}
+
+.teacher-folder-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.teacher-folder-button {
+  width: 100%;
+  min-height: 52px;
+  padding: 12px 14px;
+  border: 0;
+  border-radius: 16px;
+  color: var(--green-dark);
+  background: rgba(220, 239, 227, 0.7);
+  display: grid;
+  gap: 3px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.teacher-folder-button strong,
+.teacher-folder-button small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.teacher-folder-button small {
+  color: var(--muted);
+  font-weight: 850;
+}
+
+.settings-button {
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(15, 118, 94, 0.18);
+  border-radius: 999px;
+  color: var(--green-dark);
+  background: rgba(255, 255, 255, 0.9);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.inline-edit-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  grid-column: 1 / -1;
+}
+
+.inline-edit-row input {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid rgba(15, 118, 94, 0.16);
+  border-radius: 12px;
+  color: var(--green-dark);
+  background: rgba(255, 255, 255, 0.82);
+  outline: none;
+  font-weight: 850;
+}
+
+.inline-edit-row button {
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 12px;
+  color: #fffdf5;
+  background: var(--green-dark);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 900;
 }
 
 .student-item {
@@ -864,7 +1198,29 @@ button.metric-card {
 }
 
 .student-item-wrap .student-item {
-  padding-right: 48px;
+  padding: 10px 44px 10px 14px;
+}
+
+.student-item-card {
+  position: relative;
+  display: grid;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.student-item-title-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 42px);
+  min-width: 0;
+  padding-left: 2px;
+}
+
+.student-item-title-row strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .student-group-editor {
@@ -899,6 +1255,21 @@ button.metric-card {
 .student-group-editor button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
+}
+
+.student-settings-button {
+  position: static;
+  opacity: 1;
+  pointer-events: auto;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  padding: 0;
+}
+
+.student-name-edit {
+  padding-right: 42px;
+  margin-bottom: 8px;
 }
 
 .delete-task-button {

@@ -18,6 +18,7 @@ interface StudentRow {
   currentLevel: string;
   group: string;
   teacherId: string;
+  teacherName?: string;
   assistantId: string;
   createdAt: string;
   updatedAt: string;
@@ -84,6 +85,20 @@ interface ChatMessageRow {
   createdAt: string;
 }
 
+interface SharedFileRow {
+  id: string;
+  uploaderId: string;
+  uploaderRole: "teacher" | "assistant";
+  uploaderName: string;
+  note: string;
+  fileName: string;
+  fileType: string;
+  fileUrl: string;
+  fileData?: string | null;
+  fileSize?: number | null;
+  createdAt: string;
+}
+
 export const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 const port = Number(process.env.PORT ?? 4000);
@@ -117,7 +132,7 @@ const createStudentSchema = z.object({
   targetScore: z.number().min(0).max(9).default(0),
   currentLevel: z.string().default(""),
   group: z.string().trim().min(1),
-  teacherId: z.string().min(1).default("u-teacher-lin"),
+  teacherName: z.string().trim().min(1),
   assistantId: z.string().min(1).default("u-assistant-chen")
 });
 
@@ -126,7 +141,17 @@ const updateStudentSchema = z.object({
   grade: z.string().optional(),
   targetScore: z.number().min(0).max(9).optional(),
   currentLevel: z.string().optional(),
-  group: z.string().trim().min(1).optional()
+  group: z.string().trim().min(1).optional(),
+  teacherName: z.string().trim().min(1).optional()
+});
+
+const updateTeacherSchema = z.object({
+  name: z.string().trim().min(1).max(80)
+});
+
+const renameTeacherGroupSchema = z.object({
+  currentGroupName: z.string().trim().min(1),
+  nextGroupName: z.string().trim().min(1)
 });
 
 const createTaskSchema = z.object({
@@ -162,6 +187,13 @@ const createChatMessageSchema = z.object({
   authorRole: z.enum(["teacher", "assistant"]),
   authorName: z.string().min(1).max(40),
   message: z.string().trim().min(1).max(500)
+});
+
+const createSharedFileSchema = z.object({
+  uploaderId: z.string().min(1).default("u-teacher-lin"),
+  uploaderRole: z.enum(["teacher", "assistant"]).default("teacher"),
+  uploaderName: z.string().trim().min(1).max(40),
+  note: z.string().trim().max(300).default("")
 });
 
 const priorityRank: Record<Priority, number> = {
@@ -213,6 +245,20 @@ function mapTask(task: TaskRow) {
   };
 }
 
+async function findTeacherUserByName(name: string) {
+  return get<{ id: string; name: string }>("SELECT id, name FROM users WHERE role = 'teacher' AND name = ?", [name.trim()]);
+}
+
+async function ensureTeacherUser(name: string) {
+  const normalizedName = name.trim();
+  const existing = await findTeacherUserByName(normalizedName);
+  if (existing) return existing;
+
+  const id = createId("u-teacher");
+  await run("INSERT INTO users (id, name, role, createdAt) VALUES (?, ?, 'teacher', ?)", [id, normalizedName, now()]);
+  return { id, name: normalizedName };
+}
+
 function normalizeUploadedFileName(value: string | undefined | null, fallback = "file") {
   const fileName = basename(value || fallback);
 
@@ -240,6 +286,14 @@ function mapPrintJob(job: PrintJobRow) {
   return {
     ...job,
     fileName: normalizeUploadedFileName(job.fileName, "print-file")
+  };
+}
+
+function mapSharedFile(file: SharedFileRow) {
+  const { fileData: _fileData, ...safeFile } = file;
+  return {
+    ...safeFile,
+    fileName: normalizeUploadedFileName(file.fileName, "shared-file")
   };
 }
 
@@ -323,6 +377,30 @@ async function readTaskFileBytes(file: TaskFileRow) {
   return null;
 }
 
+async function readSharedFileBytes(file: SharedFileRow) {
+  if (file.fileData) {
+    return Buffer.from(file.fileData, "base64");
+  }
+
+  if (file.fileUrl.startsWith("data:")) {
+    const base64 = file.fileUrl.split(",", 2)[1] ?? "";
+    return Buffer.from(base64, "base64");
+  }
+
+  if (file.fileUrl.startsWith("http://") || file.fileUrl.startsWith("https://")) {
+    const response = await fetch(file.fileUrl);
+    if (!response.ok) return null;
+    return Buffer.from(await response.arrayBuffer());
+  }
+
+  if (file.fileUrl.startsWith("/uploads/")) {
+    const storedName = basename(file.fileUrl.replace("/uploads/", ""));
+    return readFile(join(uploadDirectory, storedName)).catch(() => null);
+  }
+
+  return null;
+}
+
 async function createParentFeedbackImage(input: {
   task: TaskRow;
   student: StudentRow | undefined;
@@ -386,10 +464,14 @@ app.get("/health", (_req, res) => {
 
 app.get("/api/dashboard", async (_req, res, next) => {
   try {
-    const [users, students, tasks, taskFiles, parentExports, printJobs, auditLogs, chatMessages] = await Promise.all([
+    const [users, students, tasks, taskFiles, parentExports, printJobs, auditLogs, chatMessages, sharedFiles] = await Promise.all([
       all("SELECT * FROM users ORDER BY createdAt ASC"),
       all<StudentRow>(
-        "SELECT id, name, grade, targetScore, currentLevel, `group` AS `group`, teacherId, assistantId, createdAt, updatedAt FROM students ORDER BY createdAt ASC"
+        `SELECT students.id, students.name, students.grade, students.targetScore, students.currentLevel, students.\`group\` AS \`group\`,
+                students.teacherId, users.name AS teacherName, students.assistantId, students.createdAt, students.updatedAt
+         FROM students
+         LEFT JOIN users ON users.id = students.teacherId
+         ORDER BY students.createdAt ASC`
       ),
       all<TaskRow>("SELECT * FROM tasks ORDER BY createdAt ASC"),
       all<TaskFileRow>(
@@ -398,7 +480,10 @@ app.get("/api/dashboard", async (_req, res, next) => {
       all("SELECT * FROM parent_exports ORDER BY createdAt DESC"),
       all<PrintJobRow>("SELECT * FROM print_jobs ORDER BY createdAt DESC"),
       all<AuditLogRow>("SELECT * FROM audit_logs ORDER BY createdAt DESC LIMIT 80"),
-      all<ChatMessageRow>("SELECT * FROM chat_messages ORDER BY createdAt DESC LIMIT 60")
+      all<ChatMessageRow>("SELECT * FROM chat_messages ORDER BY createdAt DESC LIMIT 60"),
+      all<SharedFileRow>(
+        "SELECT id, uploaderId, uploaderRole, uploaderName, note, fileName, fileType, fileUrl, fileSize, createdAt FROM shared_files ORDER BY createdAt DESC LIMIT 40"
+      )
     ]);
     const tasksWithCorrection = new Set(
       taskFiles
@@ -416,6 +501,7 @@ app.get("/api/dashboard", async (_req, res, next) => {
       printJobs: printJobs.map(mapPrintJob),
       auditLogs,
       chatMessages: chatMessages.reverse(),
+      sharedFiles: sharedFiles.map(mapSharedFile),
       summary: {
         studentCount: students.length,
         activeTasks: tasks.filter((task) => task.status !== "completed").length,
@@ -423,6 +509,144 @@ app.get("/api/dashboard", async (_req, res, next) => {
         pendingPrintJobs: printJobs.filter((job) => job.status === "pending").length
       }
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/shared-files", upload.single("file"), async (req, res, next) => {
+  try {
+    if (!req.file) {
+      res.status(400).json({ message: "Shared file is required" });
+      return;
+    }
+
+    const payload = createSharedFileSchema.parse(req.body);
+    const id = createId("sf");
+    const timestamp = now();
+    const originalName = normalizeUploadedFileName(req.file.originalname, "shared-file");
+    const safeName = basename(originalName).replace(/[^\w.-]+/g, "_");
+    const storedName = `${id}-${safeName}`;
+    const fileUrl = `/uploads/${storedName}`;
+
+    await mkdir(uploadDirectory, { recursive: true });
+    await writeFile(join(uploadDirectory, storedName), req.file.buffer);
+
+    await run(
+      `INSERT INTO shared_files (id, uploaderId, uploaderRole, uploaderName, note, fileName, fileType, fileUrl, fileData, fileSize, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        payload.uploaderId,
+        payload.uploaderRole,
+        payload.uploaderName,
+        payload.note,
+        originalName,
+        req.file.mimetype ?? "application/octet-stream",
+        fileUrl,
+        req.file.buffer.toString("base64"),
+        req.file.buffer.length,
+        timestamp
+      ]
+    );
+
+    await writeAuditLog({
+      actor: payload.uploaderId,
+      action: "shared_file_uploaded",
+      entityType: "shared_file",
+      entityId: id,
+      detail: `${payload.uploaderName} uploaded ${originalName} to shared files`
+    });
+
+    const sharedFile = await get<SharedFileRow>(
+      "SELECT id, uploaderId, uploaderRole, uploaderName, note, fileName, fileType, fileUrl, fileSize, createdAt FROM shared_files WHERE id = ?",
+      [id]
+    );
+    res.status(201).json(sharedFile ? mapSharedFile(sharedFile) : sharedFile);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/shared-files/:sharedFileId/print-jobs", async (req, res, next) => {
+  try {
+    const sharedFileId = String(req.params.sharedFileId);
+    const payload = createPrintJobSchema.parse(req.body);
+    const sharedFile = await get<SharedFileRow>("SELECT * FROM shared_files WHERE id = ?", [sharedFileId]);
+    if (!sharedFile) {
+      res.status(404).json({ message: "Shared file not found" });
+      return;
+    }
+
+    const bytes = await readSharedFileBytes(sharedFile);
+    if (!bytes) {
+      res.status(404).json({ message: "Stored shared file content is no longer available" });
+      return;
+    }
+
+    const id = createId("p");
+    const timestamp = now();
+    const originalName = normalizeUploadedFileName(sharedFile.fileName, "shared-file");
+    const safeName = basename(originalName).replace(/[^\w.-]+/g, "_");
+    const storedName = `${id}-${safeName}`;
+    const fileUrl = `/uploads/${storedName}`;
+
+    await mkdir(uploadDirectory, { recursive: true });
+    await writeFile(join(uploadDirectory, storedName), bytes);
+
+    await run(
+      `INSERT INTO print_jobs (id, requester, copies, note, fileName, fileType, fileUrl, status, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+      [
+        id,
+        payload.requester,
+        payload.copies,
+        payload.note,
+        originalName,
+        sharedFile.fileType,
+        fileUrl,
+        timestamp,
+        timestamp
+      ]
+    );
+
+    await writeAuditLog({
+      actor: sharedFile.uploaderId,
+      action: "shared_file_print_job_created",
+      entityType: "print_job",
+      entityId: id,
+      detail: `Added shared file ${originalName} to print queue (${payload.copies} copies, ${payload.requester})`
+    });
+
+    res.status(201).json(await get<PrintJobRow>("SELECT * FROM print_jobs WHERE id = ?", [id]));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/shared-files/:sharedFileId", async (req, res, next) => {
+  try {
+    const sharedFileId = String(req.params.sharedFileId);
+    const existing = await get<SharedFileRow>("SELECT * FROM shared_files WHERE id = ?", [sharedFileId]);
+    if (!existing) {
+      res.status(404).json({ message: "Shared file not found" });
+      return;
+    }
+
+    if (existing.fileUrl.startsWith("/uploads/")) {
+      const storedName = basename(existing.fileUrl.replace("/uploads/", ""));
+      await unlink(join(uploadDirectory, storedName)).catch(() => undefined);
+    }
+
+    await run("DELETE FROM shared_files WHERE id = ?", [sharedFileId]);
+    await writeAuditLog({
+      actor: existing.uploaderId,
+      action: "shared_file_deleted",
+      entityType: "shared_file",
+      entityId: sharedFileId,
+      detail: `Deleted shared file ${normalizeUploadedFileName(existing.fileName)}`
+    });
+    res.status(204).send();
   } catch (error) {
     next(error);
   }
@@ -481,7 +705,11 @@ app.get("/api/students", async (_req, res, next) => {
   try {
     res.json(
       await all<StudentRow>(
-        "SELECT id, name, grade, targetScore, currentLevel, `group` AS `group`, teacherId, assistantId, createdAt, updatedAt FROM students ORDER BY createdAt ASC"
+        `SELECT students.id, students.name, students.grade, students.targetScore, students.currentLevel, students.\`group\` AS \`group\`,
+                students.teacherId, users.name AS teacherName, students.assistantId, students.createdAt, students.updatedAt
+         FROM students
+         LEFT JOIN users ON users.id = students.teacherId
+         ORDER BY students.createdAt ASC`
       )
     );
   } catch (error) {
@@ -504,6 +732,7 @@ app.post("/api/students", async (req, res, next) => {
     const payload = createStudentSchema.parse(req.body);
     const id = createId("s");
     const timestamp = now();
+    const teacher = await ensureTeacherUser(payload.teacherName);
 
     await run(
       `INSERT INTO students (id, name, grade, targetScore, currentLevel, \`group\`, teacherId, assistantId, createdAt, updatedAt)
@@ -515,7 +744,7 @@ app.post("/api/students", async (req, res, next) => {
         payload.targetScore,
         payload.currentLevel,
         payload.group,
-        payload.teacherId,
+        teacher.id,
         payload.assistantId,
         timestamp,
         timestamp
@@ -523,7 +752,11 @@ app.post("/api/students", async (req, res, next) => {
     );
 
     const student = await get<StudentRow>(
-      "SELECT id, name, grade, targetScore, currentLevel, `group` AS `group`, teacherId, assistantId, createdAt, updatedAt FROM students WHERE id = ?",
+      `SELECT students.id, students.name, students.grade, students.targetScore, students.currentLevel, students.\`group\` AS \`group\`,
+              students.teacherId, users.name AS teacherName, students.assistantId, students.createdAt, students.updatedAt
+       FROM students
+       LEFT JOIN users ON users.id = students.teacherId
+       WHERE students.id = ?`,
       [id]
     );
     res.status(201).json(student);
@@ -537,22 +770,28 @@ app.patch("/api/students/:studentId", async (req, res, next) => {
     const studentId = String(req.params.studentId);
     const payload = updateStudentSchema.parse(req.body);
     const existing = await get<StudentRow>(
-      "SELECT id, name, grade, targetScore, currentLevel, `group` AS `group`, teacherId, assistantId, createdAt, updatedAt FROM students WHERE id = ?",
+      `SELECT students.id, students.name, students.grade, students.targetScore, students.currentLevel, students.\`group\` AS \`group\`,
+              students.teacherId, users.name AS teacherName, students.assistantId, students.createdAt, students.updatedAt
+       FROM students
+       LEFT JOIN users ON users.id = students.teacherId
+       WHERE students.id = ?`,
       [studentId]
     );
     if (!existing) {
       res.status(404).json({ message: "Student not found" });
       return;
     }
+    const teacher = payload.teacherName ? await ensureTeacherUser(payload.teacherName) : { id: existing.teacherId };
 
     await run(
-      "UPDATE students SET name = ?, grade = ?, targetScore = ?, currentLevel = ?, `group` = ?, updatedAt = ? WHERE id = ?",
+      "UPDATE students SET name = ?, grade = ?, targetScore = ?, currentLevel = ?, `group` = ?, teacherId = ?, updatedAt = ? WHERE id = ?",
       [
         payload.name ?? existing.name,
         payload.grade ?? existing.grade,
         payload.targetScore ?? existing.targetScore,
         payload.currentLevel ?? existing.currentLevel,
         payload.group ?? existing.group,
+        teacher.id,
         now(),
         studentId
       ]
@@ -568,7 +807,11 @@ app.patch("/api/students/:studentId", async (req, res, next) => {
     }
 
     const student = await get<StudentRow>(
-      "SELECT id, name, grade, targetScore, currentLevel, `group` AS `group`, teacherId, assistantId, createdAt, updatedAt FROM students WHERE id = ?",
+      `SELECT students.id, students.name, students.grade, students.targetScore, students.currentLevel, students.\`group\` AS \`group\`,
+              students.teacherId, users.name AS teacherName, students.assistantId, students.createdAt, students.updatedAt
+       FROM students
+       LEFT JOIN users ON users.id = students.teacherId
+       WHERE students.id = ?`,
       [studentId]
     );
     res.json(student);
@@ -617,6 +860,103 @@ app.delete("/api/student-groups/:groupName", async (req, res, next) => {
       action: "student_group_deleted",
       entityType: "student_group",
       entityId: groupName,
+      detail: `Deleted ${students.length} students from group ${groupName}`
+    });
+
+    res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/teachers/:teacherId", async (req, res, next) => {
+  try {
+    const teacherId = String(req.params.teacherId);
+    const payload = updateTeacherSchema.parse(req.body);
+    const existing = await get<{ id: string; name: string }>("SELECT id, name FROM users WHERE id = ? AND role = 'teacher'", [teacherId]);
+    if (!existing) {
+      res.status(404).json({ message: "Teacher not found" });
+      return;
+    }
+
+    await run("UPDATE users SET name = ? WHERE id = ?", [payload.name, teacherId]);
+    await writeAuditLog({
+      actor: teacherId,
+      action: "teacher_renamed",
+      entityType: "teacher",
+      entityId: teacherId,
+      detail: `Teacher name changed from ${existing.name} to ${payload.name}`
+    });
+
+    res.json({ id: teacherId, name: payload.name });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/teachers/:teacherId/groups/rename", async (req, res, next) => {
+  try {
+    const teacherId = String(req.params.teacherId);
+    const payload = renameTeacherGroupSchema.parse(req.body);
+    const students = await all<StudentRow>(
+      `SELECT students.id, students.name, students.grade, students.targetScore, students.currentLevel, students.\`group\` AS \`group\`,
+              students.teacherId, users.name AS teacherName, students.assistantId, students.createdAt, students.updatedAt
+       FROM students
+       LEFT JOIN users ON users.id = students.teacherId
+       WHERE students.teacherId = ? AND students.\`group\` = ?`,
+      [teacherId, payload.currentGroupName]
+    );
+    if (!students.length) {
+      res.status(404).json({ message: "Teacher group not found" });
+      return;
+    }
+
+    await run("UPDATE students SET `group` = ?, updatedAt = ? WHERE teacherId = ? AND `group` = ?", [
+      payload.nextGroupName,
+      now(),
+      teacherId,
+      payload.currentGroupName
+    ]);
+    await writeAuditLog({
+      actor: teacherId,
+      action: "teacher_group_renamed",
+      entityType: "student_group",
+      entityId: `${teacherId}:${payload.currentGroupName}`,
+      detail: `Group ${payload.currentGroupName} renamed to ${payload.nextGroupName}`
+    });
+
+    res.json({ updatedCount: students.length });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/teachers/:teacherId/groups/:groupName", async (req, res, next) => {
+  try {
+    const teacherId = String(req.params.teacherId);
+    const groupName = String(req.params.groupName);
+    const students = await all<StudentRow>(
+      `SELECT students.id, students.name, students.grade, students.targetScore, students.currentLevel, students.\`group\` AS \`group\`,
+              students.teacherId, users.name AS teacherName, students.assistantId, students.createdAt, students.updatedAt
+       FROM students
+       LEFT JOIN users ON users.id = students.teacherId
+       WHERE students.teacherId = ? AND students.\`group\` = ?`,
+      [teacherId, groupName]
+    );
+    if (!students.length) {
+      res.status(404).json({ message: "Teacher group not found" });
+      return;
+    }
+
+    for (const student of students) {
+      await deleteStudentWithTasks(student.id);
+    }
+
+    await writeAuditLog({
+      actor: teacherId,
+      action: "teacher_group_deleted",
+      entityType: "student_group",
+      entityId: `${teacherId}:${groupName}`,
       detail: `Deleted ${students.length} students from group ${groupName}`
     });
 

@@ -145,11 +145,26 @@ function sqliteSchema(db: Database) {
       createdAt TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS shared_files (
+      id TEXT PRIMARY KEY,
+      uploaderId TEXT NOT NULL,
+      uploaderRole TEXT NOT NULL,
+      uploaderName TEXT NOT NULL,
+      note TEXT NOT NULL DEFAULT '',
+      fileName TEXT NOT NULL,
+      fileType TEXT NOT NULL,
+      fileUrl TEXT NOT NULL,
+      fileData TEXT,
+      fileSize INTEGER,
+      createdAt TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_tasks_student ON tasks(studentId);
     CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
     CREATE INDEX IF NOT EXISTS idx_print_jobs_status ON print_jobs(status);
     CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(createdAt);
     CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages(createdAt);
+    CREATE INDEX IF NOT EXISTS idx_shared_files_created ON shared_files(createdAt);
   `);
 }
 
@@ -164,6 +179,8 @@ function ensureSqliteColumn(db: Database, table: string, column: string, definit
 function sqliteMigrations(db: Database) {
   ensureSqliteColumn(db, "task_files", "fileData", "TEXT");
   ensureSqliteColumn(db, "task_files", "fileSize", "INTEGER");
+  ensureSqliteColumn(db, "shared_files", "fileData", "TEXT");
+  ensureSqliteColumn(db, "shared_files", "fileSize", "INTEGER");
 }
 
 const mysqlStatements = [
@@ -257,6 +274,20 @@ const mysqlStatements = [
     message TEXT NOT NULL,
     createdAt VARCHAR(40) NOT NULL,
     INDEX idx_chat_messages_created (createdAt)
+  )`,
+  `CREATE TABLE IF NOT EXISTS shared_files (
+    id VARCHAR(80) PRIMARY KEY,
+    uploaderId VARCHAR(80) NOT NULL,
+    uploaderRole VARCHAR(40) NOT NULL,
+    uploaderName VARCHAR(80) NOT NULL,
+    note TEXT NOT NULL,
+    fileName VARCHAR(255) NOT NULL,
+    fileType VARCHAR(120) NOT NULL,
+    fileUrl TEXT NOT NULL,
+    fileData LONGTEXT,
+    fileSize BIGINT,
+    createdAt VARCHAR(40) NOT NULL,
+    INDEX idx_shared_files_created (createdAt)
   )`
 ];
 
@@ -275,6 +306,8 @@ async function ensureMysqlColumn(pool: Pool, table: string, column: string, defi
 async function mysqlMigrations(pool: Pool) {
   await ensureMysqlColumn(pool, "task_files", "fileData", "LONGTEXT");
   await ensureMysqlColumn(pool, "task_files", "fileSize", "BIGINT");
+  await ensureMysqlColumn(pool, "shared_files", "fileData", "LONGTEXT");
+  await ensureMysqlColumn(pool, "shared_files", "fileSize", "BIGINT");
 }
 
 async function seedIfEmpty(query: (sql: string, params?: RowValue[]) => Promise<unknown[]>, exec: (sql: string, params?: RowValue[]) => Promise<void>) {

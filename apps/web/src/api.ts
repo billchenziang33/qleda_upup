@@ -1,4 +1,15 @@
-import type { ChatMessage, CreateStudentInput, CreateTaskInput, DashboardData, ParentExport, PrintJob, Student, Task, TaskFile, TaskStatus } from "./types";
+import type {
+  CreateStudentInput,
+  CreateTaskInput,
+  DashboardData,
+  ParentExport,
+  PrintJob,
+  SharedFile,
+  Student,
+  Task,
+  TaskFile,
+  TaskStatus
+} from "./types";
 
 const cloudBaseRunApiUrl = "https://qleda-api-263206-10-1437709388.sh.run.tcloudbase.com";
 
@@ -43,8 +54,22 @@ export function createStudent(input: CreateStudentInput) {
   });
 }
 
-export function updateStudent(studentId: string, input: { name?: string; group?: string }) {
+export function updateStudent(studentId: string, input: { name?: string; group?: string; teacherName?: string }) {
   return request<Student>(`/api/students/${studentId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input)
+  });
+}
+
+export function updateTeacherName(teacherId: string, input: { name: string }) {
+  return request<{ id: string; name: string }>(`/api/teachers/${teacherId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input)
+  });
+}
+
+export function renameTeacherGroup(teacherId: string, input: { currentGroupName: string; nextGroupName: string }) {
+  return request<{ updatedCount: number }>(`/api/teachers/${teacherId}/groups/rename`, {
     method: "PATCH",
     body: JSON.stringify(input)
   });
@@ -93,6 +118,16 @@ export async function deleteStudent(studentId: string) {
 
 export async function deleteStudentGroup(groupName: string) {
   const response = await fetch(`${apiBaseUrl}/api/student-groups/${encodeURIComponent(groupName)}`, {
+    method: "DELETE"
+  });
+
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
+}
+
+export async function deleteTeacherGroup(teacherId: string, groupName: string) {
+  const response = await fetch(`${apiBaseUrl}/api/teachers/${teacherId}/groups/${encodeURIComponent(groupName)}`, {
     method: "DELETE"
   });
 
@@ -199,23 +234,6 @@ export function createPrintJob(input: { file: File; requester: string; copies: n
   });
 }
 
-export function createChatMessage(input: { authorRole: "teacher" | "assistant"; authorName: string; message: string }) {
-  return request<ChatMessage>("/api/chat-messages", {
-    method: "POST",
-    body: JSON.stringify(input)
-  });
-}
-
-export async function deleteChatMessage(messageId: string) {
-  const response = await fetch(`${apiBaseUrl}/api/chat-messages/${messageId}`, {
-    method: "DELETE"
-  });
-
-  if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
-  }
-}
-
 export async function deletePrintJob(jobId: string) {
   const response = await fetch(`${apiBaseUrl}/api/print-jobs/${jobId}`, {
     method: "DELETE"
@@ -230,5 +248,42 @@ export function createParentExport(taskId: string) {
   return request<ParentExport>(`/api/tasks/${taskId}/parent-exports`, {
     method: "POST",
     body: JSON.stringify({})
+  });
+}
+
+export function createSharedFile(input: {
+  file: File;
+  uploaderId: string;
+  uploaderRole: "teacher" | "assistant";
+  uploaderName: string;
+  note: string;
+}) {
+  const formData = new FormData();
+  formData.append("file", input.file);
+  formData.append("uploaderId", input.uploaderId);
+  formData.append("uploaderRole", input.uploaderRole);
+  formData.append("uploaderName", input.uploaderName);
+  formData.append("note", input.note);
+
+  return request<SharedFile>("/api/shared-files", {
+    method: "POST",
+    body: formData
+  });
+}
+
+export async function deleteSharedFile(sharedFileId: string) {
+  const response = await fetch(`${apiBaseUrl}/api/shared-files/${sharedFileId}`, {
+    method: "DELETE"
+  });
+
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
+}
+
+export function createPrintJobFromSharedFile(sharedFileId: string, input: { requester: string; copies: number; note: string }) {
+  return request<PrintJob>(`/api/shared-files/${sharedFileId}/print-jobs`, {
+    method: "POST",
+    body: JSON.stringify(input)
   });
 }
