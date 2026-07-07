@@ -1,4 +1,4 @@
-﻿import { FormEvent, useEffect, useRef, useState } from "react";
+﻿import { type DragEvent, FormEvent, useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   BookOpenCheck,
@@ -7,6 +7,7 @@ import {
   ClipboardList,
   Download,
   Files,
+  GripVertical,
   GraduationCap,
   ImageDown,
   Loader2,
@@ -26,6 +27,7 @@ import {
   createPrintJob,
   createSharedFile,
   createStudent,
+  createTeacher,
   deleteTeacherGroup,
   deletePrintJob,
   deleteSharedFile,
@@ -33,7 +35,10 @@ import {
   deleteStudent,
   deleteTask,
   deleteTaskFile,
+  downloadDailyFeedbackPdf,
   getDashboard,
+  getDashboardVersion,
+  moveTeacherGroup,
   resolveApiUrl,
   renameTeacherGroup,
   updateTeacherName,
@@ -42,14 +47,14 @@ import {
   updateTask,
   uploadTaskFile
 } from "./api";
-import type { CreateStudentInput, CreateTaskInput, DashboardData, SharedFile, Student, Task, TaskFile, TaskStatus } from "./types";
+import type { CreateStudentInput, CreateTaskInput, DashboardData, SharedFile, Student, Task, TaskFile, TaskStatus, User } from "./types";
 
 const statusLabels: Record<TaskStatus, string> = {
   not_started: "未开始",
   in_progress: "进行中",
   submitted: "已提交",
   reviewed: "已批改",
-  completed: "已完成"
+  completed: "已结束"
 };
 
 const printStatusLabels: Record<string, string> = {
@@ -64,8 +69,24 @@ const emptyStudentForm: CreateStudentInput = {
   teacherName: ""
 };
 
-const dashboardSyncIntervalMs = 4000;
+const dashboardSyncIntervalMs = 60000;
+const dashboardIdlePauseMs = 5 * 60 * 1000;
 const dashboardInitialRetryDelaysMs = [0, 1500, 3000, 6000, 10000];
+const teacherGuideStorageKey = "qleda-teacher-guide-seen-v2";
+const teacherOnboardingSteps = [
+  {
+    title: "先建立学生档案",
+    text: "从左侧添加老师或学生，也可以搜索学生姓名快速定位。"
+  },
+  {
+    title: "给学生创建任务",
+    text: "选择学生后点击新建任务，任务会进入右侧任务队列。"
+  },
+  {
+    title: "上传批改或加入打印",
+    text: "在任务卡片上传批改文件；已结束任务可从待批改列表移除。"
+  }
+];
 
 function wait(ms: number) {
   return new Promise<void>((resolve) => window.setTimeout(resolve, ms));
@@ -88,8 +109,25 @@ function sortTasksByLatest(tasks: Task[]) {
   return [...tasks].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
 }
 
-function groupStudentsByTeacher(students: Student[]) {
+type StudentArchiveDragPayload =
+  | { type: "student"; studentId: string }
+  | { type: "group"; teacherId: string; groupName: string };
+
+const studentArchiveDragMime = "application/x-qleda-student-archive";
+
+function groupStudentsByTeacher(students: Student[], users: User[] = []) {
   const teachers = new Map<string, { teacherId: string; teacherName: string; groups: Map<string, Student[]> }>();
+  users
+    .filter((user) => user.role === "teacher")
+    .sort((left, right) => studentGroupCollator.compare(left.name, right.name))
+    .forEach((teacher) => {
+      teachers.set(teacher.id, {
+        teacherId: teacher.id,
+        teacherName: teacher.name,
+        groups: new Map<string, Student[]>()
+      });
+    });
+
   [...students]
     .sort((left, right) => {
       const teacherCompare = studentGroupCollator.compare(left.teacherName || "", right.teacherName || "");
@@ -125,8 +163,22 @@ const emptyTaskForm: CreateTaskInput = {
   studentId: "",
   title: "",
   description: "",
+  dueDate: "",
   pinned: false
 };
+
+type SelectedTeacherGroup = {
+  teacherId: string;
+  teacherName: string;
+  groupName: string;
+};
+
+function getDefaultTaskDueDate() {
+  const dueDate = new Date();
+  dueDate.setHours(20, 0, 0, 0);
+  const timezoneOffsetMs = dueDate.getTimezoneOffset() * 60 * 1000;
+  return new Date(dueDate.getTime() - timezoneOffsetMs).toISOString().slice(0, 16);
+}
 
 function formatDateTime(value: string) {
   return new Intl.DateTimeFormat("zh-CN", {
@@ -135,6 +187,34 @@ function formatDateTime(value: string) {
     hour: "2-digit",
     minute: "2-digit"
   }).format(new Date(value));
+}
+
+function formatTaskDueDate(value: string) {
+  if (!value) return "未设置 DDL";
+  const normalizedValue = /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T20:00` : value;
+  const date = new Date(normalizedValue);
+  if (Number.isNaN(date.getTime())) return value;
+
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(date);
+}
+
+function getTaskDateKey(value: string) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  if (/^\d{4}-\d{2}-\d{2}T/.test(value)) return value.slice(0, 10);
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60 * 1000);
+  return localDate.toISOString().slice(0, 10);
+}
+
+function getTodayDateInputValue() {
+  const today = new Date();
+  return new Date(today.getTime() - today.getTimezoneOffset() * 60 * 1000).toISOString().slice(0, 10);
 }
 
 function sanitizeDownloadFileName(value: string, fallback: string) {
@@ -359,6 +439,9 @@ function App() {
   const [portalMode, setPortalMode] = useState<PortalMode>("landing");
   const [studentPortalId, setStudentPortalId] = useState("");
   const [selectedStudentId, setSelectedStudentId] = useState("all");
+  const [selectedTeacherGroup, setSelectedTeacherGroup] = useState<SelectedTeacherGroup | null>(null);
+  const [isPendingReviewListOpen, setIsPendingReviewListOpen] = useState(false);
+  const [studentSearchQuery, setStudentSearchQuery] = useState("");
   const [locatedTaskId, setLocatedTaskId] = useState<string | null>(null);
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -367,12 +450,17 @@ function App() {
   const [studentForm, setStudentForm] = useState<CreateStudentInput>(emptyStudentForm);
   const [studentFormError, setStudentFormError] = useState("");
   const [isSavingStudent, setIsSavingStudent] = useState(false);
+  const [isTeacherFormOpen, setIsTeacherFormOpen] = useState(false);
+  const [teacherFormName, setTeacherFormName] = useState("");
+  const [teacherFormError, setTeacherFormError] = useState("");
+  const [isSavingTeacher, setIsSavingTeacher] = useState(false);
   const [isTaskFormOpen, setIsTaskFormOpen] = useState(false);
+  const [taskFormMode, setTaskFormMode] = useState<"student" | "group">("student");
   const [taskForm, setTaskForm] = useState<CreateTaskInput>(emptyTaskForm);
   const [taskFormError, setTaskFormError] = useState("");
   const [isSavingTask, setIsSavingTask] = useState(false);
   const [assignmentTaskId, setAssignmentTaskId] = useState<string | null>(null);
-  const [assignmentFile, setAssignmentFile] = useState<File | null>(null);
+  const [assignmentFiles, setAssignmentFiles] = useState<File[]>([]);
   const [assignmentError, setAssignmentError] = useState("");
   const [isSavingAssignment, setIsSavingAssignment] = useState(false);
   const [correctionTaskId, setCorrectionTaskId] = useState<string | null>(null);
@@ -380,6 +468,7 @@ function App() {
   const [correctionNote, setCorrectionNote] = useState("");
   const [correctionError, setCorrectionError] = useState("");
   const [isSavingCorrection, setIsSavingCorrection] = useState(false);
+  const [updatingTaskStatusId, setUpdatingTaskStatusId] = useState<string | null>(null);
   const [deleteTaskId, setDeleteTaskId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState("");
   const [isDeletingTask, setIsDeletingTask] = useState(false);
@@ -388,6 +477,7 @@ function App() {
   const [isDeletingStudent, setIsDeletingStudent] = useState(false);
   const [expandedTeachers, setExpandedTeachers] = useState<Set<string>>(() => new Set());
   const [expandedStudentGroups, setExpandedStudentGroups] = useState<Set<string>>(() => new Set());
+  const [dragTargetKey, setDragTargetKey] = useState<string | null>(null);
   const [deletingStudentGroup, setDeletingStudentGroup] = useState("");
   const [deletingFileId, setDeletingFileId] = useState<string | null>(null);
   const [printFile, setPrintFile] = useState<File | null>(null);
@@ -399,16 +489,36 @@ function App() {
   const [deletingPrintJobId, setDeletingPrintJobId] = useState<string | null>(null);
   const [previewFile, setPreviewFile] = useState<TaskFile | { name: string; url: string; fileType: string } | null>(null);
   const [sharedFileUpload, setSharedFileUpload] = useState<File | null>(null);
+  const [sharedFileSearchQuery, setSharedFileSearchQuery] = useState("");
   const [sharedFileError, setSharedFileError] = useState("");
   const [isSavingSharedFile, setIsSavingSharedFile] = useState(false);
   const [deletingSharedFileId, setDeletingSharedFileId] = useState<string | null>(null);
+  const [printQueueSearchQuery, setPrintQueueSearchQuery] = useState("");
   const [isAuditExpanded, setIsAuditExpanded] = useState(false);
   const [isTaskListExpanded, setIsTaskListExpanded] = useState(false);
+  const [isDailyFeedbackFormOpen, setIsDailyFeedbackFormOpen] = useState(false);
+  const [dailyFeedbackDate, setDailyFeedbackDate] = useState(getTodayDateInputValue());
+  const [dailyFeedbackError, setDailyFeedbackError] = useState("");
+  const [isDownloadingDailyFeedback, setIsDownloadingDailyFeedback] = useState(false);
+  const [isTeacherGuideOpen, setIsTeacherGuideOpen] = useState(false);
+  const [isTeacherGuidePreviewOpen, setIsTeacherGuidePreviewOpen] = useState(false);
+  const [teacherGuideStep, setTeacherGuideStep] = useState(0);
+  const [toast, setToast] = useState<{ message: string; tone: "success" | "error" } | null>(null);
   const dashboardRef = useRef<DashboardData | null>(null);
   const isLoadingDashboardRef = useRef(false);
+  const latestDashboardVersionRef = useRef("");
+  const lastActivityAtRef = useRef(Date.now());
+  const lastDashboardVersionCheckAtRef = useRef(0);
+  const toastTimerRef = useRef<number | null>(null);
 
-  async function loadDashboard(options: { silent?: boolean; retryDelays?: number[] } = {}) {
-    if (isLoadingDashboardRef.current) return;
+  async function loadDashboard(options: { silent?: boolean; retryDelays?: number[]; force?: boolean } = {}) {
+    if (isLoadingDashboardRef.current) {
+      if (!options.force) return;
+      for (let attempt = 0; attempt < 10 && isLoadingDashboardRef.current; attempt += 1) {
+        await wait(120);
+      }
+      if (isLoadingDashboardRef.current) return;
+    }
     isLoadingDashboardRef.current = true;
     const retryDelays = options.retryDelays ?? (options.silent ? [0] : dashboardInitialRetryDelaysMs);
     const totalAttempts = retryDelays.length;
@@ -451,6 +561,7 @@ function App() {
             });
           }
           dashboardRef.current = nextDashboard;
+          latestDashboardVersionRef.current = nextDashboard.version;
           setDashboard(nextDashboard);
           setError("");
           return;
@@ -480,22 +591,71 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const syncDashboard = () => {
-      if (document.visibilityState === "visible") {
-        void loadDashboard({ silent: true });
+    const markActivity = () => {
+      lastActivityAtRef.current = Date.now();
+    };
+
+    window.addEventListener("touchstart", markActivity);
+    window.addEventListener("wheel", markActivity);
+
+    return () => {
+      window.removeEventListener("touchstart", markActivity);
+      window.removeEventListener("wheel", markActivity);
+    };
+  }, []);
+
+  useEffect(() => {
+    const syncDashboard = async (options: { forceVersionCheck?: boolean; markActive?: boolean } = {}) => {
+      if (options.markActive) {
+        lastActivityAtRef.current = Date.now();
+      }
+      if (portalMode !== "teacher") return;
+      if (document.visibilityState !== "visible") return;
+      if (Date.now() - lastActivityAtRef.current > dashboardIdlePauseMs) return;
+
+      const nowMs = Date.now();
+      if (!options.forceVersionCheck && nowMs - lastDashboardVersionCheckAtRef.current < 15000) {
+        return;
+      }
+      lastDashboardVersionCheckAtRef.current = nowMs;
+
+      try {
+        const { version } = await getDashboardVersion();
+        if (!latestDashboardVersionRef.current || version !== latestDashboardVersionRef.current) {
+          await loadDashboard({ silent: true });
+        }
+      } catch {
+        await loadDashboard({ silent: true });
       }
     };
 
-    const timer = window.setInterval(syncDashboard, dashboardSyncIntervalMs);
-    document.addEventListener("visibilitychange", syncDashboard);
-    window.addEventListener("focus", syncDashboard);
+    const handleVisibilityChange = () => {
+      void syncDashboard({ forceVersionCheck: true });
+    };
+    const handleFocus = () => {
+      void syncDashboard({ forceVersionCheck: true, markActive: true });
+    };
+    const handleResume = () => {
+      const wasIdle = Date.now() - lastActivityAtRef.current > dashboardIdlePauseMs;
+      void syncDashboard({ forceVersionCheck: wasIdle, markActive: true });
+    };
+
+    const timer = window.setInterval(() => {
+      void syncDashboard();
+    }, dashboardSyncIntervalMs);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", handleFocus);
+    window.addEventListener("pointerdown", handleResume);
+    window.addEventListener("keydown", handleResume);
 
     return () => {
       window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", syncDashboard);
-      window.removeEventListener("focus", syncDashboard);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", handleFocus);
+      window.removeEventListener("pointerdown", handleResume);
+      window.removeEventListener("keydown", handleResume);
     };
-  }, []);
+  }, [portalMode]);
 
   useEffect(() => {
     if (!locatedTaskId) return;
@@ -510,22 +670,48 @@ function App() {
 
   useEffect(() => {
     setIsTaskListExpanded(false);
-  }, [selectedStudentId]);
+  }, [selectedStudentId, selectedTeacherGroup, isPendingReviewListOpen]);
+
+  useEffect(() => {
+    if (portalMode !== "teacher") return;
+    if (window.localStorage.getItem(teacherGuideStorageKey)) return;
+    setTeacherGuideStep(0);
+    setIsTeacherGuideOpen(true);
+  }, [portalMode]);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    };
+  }, []);
+
+  function showToast(message: string, tone: "success" | "error" = "success") {
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    setToast({ message, tone });
+    toastTimerRef.current = window.setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, 2000);
+  }
+
+  function closeTeacherGuide() {
+    window.localStorage.setItem(teacherGuideStorageKey, "1");
+    setIsTeacherGuideOpen(false);
+  }
 
   function locateTask(taskId: string, studentId: string) {
+    setIsPendingReviewListOpen(false);
     setSelectedStudentId(studentId);
+    setSelectedTeacherGroup(null);
     setLocatedTaskId(taskId);
   }
 
   function locatePendingReviewTask() {
-    const tasksWithCorrection = new Set(
-      dashboard?.taskFiles
-        .filter((file) => file.uploaderRole === "assistant" && file.fileType.startsWith("image/"))
-        .map((file) => file.taskId)
-    );
-    const task = dashboard?.tasks.find((item) => item.status !== "completed" && !tasksWithCorrection.has(item.id));
-    if (!task) return;
-    locateTask(task.id, task.studentId);
+    setSelectedStudentId("all");
+    setSelectedTeacherGroup(null);
+    setLocatedTaskId(null);
+    setIsTaskListExpanded(true);
+    setIsPendingReviewListOpen(true);
   }
 
   async function handleExport(taskId: string) {
@@ -567,23 +753,100 @@ function App() {
     }
   }
 
+  function mergeTaskIntoDashboard(updatedTask: Task) {
+    const currentDashboard = dashboardRef.current;
+    if (!currentDashboard) return;
+
+    const nextTasks = currentDashboard.tasks.map((task) => (task.id === updatedTask.id ? updatedTask : task));
+    const correctedTaskIds = new Set(
+      currentDashboard.taskFiles
+        .filter((file) => file.uploaderRole === "assistant" && file.fileType.startsWith("image/"))
+        .map((file) => file.taskId)
+    );
+    const nextDashboard: DashboardData = {
+      ...currentDashboard,
+      tasks: nextTasks,
+      summary: {
+        ...currentDashboard.summary,
+        activeTasks: nextTasks.filter((task) => task.status !== "completed").length,
+        pendingReview: nextTasks.filter((task) => task.status !== "completed" && !correctedTaskIds.has(task.id)).length
+      }
+    };
+
+    dashboardRef.current = nextDashboard;
+    setDashboard(nextDashboard);
+  }
+
+  async function handleCreateTeacher(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const name = teacherFormName.trim();
+    if (!name) {
+      setTeacherFormError("请输入老师名字。");
+      return;
+    }
+
+    setTeacherFormError("");
+    setIsSavingTeacher(true);
+
+    try {
+      const teacher = await createTeacher({ name });
+      setExpandedTeachers((current) => new Set(current).add(teacher.id));
+      setTeacherFormName("");
+      setIsTeacherFormOpen(false);
+      await loadDashboard({ force: true });
+    } catch {
+      setTeacherFormError("老师保存失败，请确认后端服务正常。");
+    } finally {
+      setIsSavingTeacher(false);
+    }
+  }
+
   async function handleCreateTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setTaskFormError("");
     setIsSavingTask(true);
 
     try {
-      const task = await createTask(taskForm);
-      await loadDashboard();
-      setSelectedStudentId(task.studentId);
-      setLocatedTaskId(task.id);
+      if (taskFormMode === "group") {
+        const groupStudents =
+          dashboardRef.current?.students.filter(
+            (student) => selectedTeacherGroup && student.teacherId === selectedTeacherGroup.teacherId && student.group === selectedTeacherGroup.groupName
+          ) ?? [];
+
+        if (!selectedTeacherGroup || groupStudents.length === 0) {
+          setTaskFormError("当前班级没有学生，无法创建班级任务。");
+          return;
+        }
+
+        const createdTasks = await Promise.all(
+          groupStudents.map((student) =>
+            createTask({
+              ...taskForm,
+              studentId: student.id
+            })
+          )
+        );
+        await loadDashboard();
+        setSelectedStudentId("all");
+        setIsPendingReviewListOpen(false);
+        setLocatedTaskId(createdTasks[0]?.id ?? null);
+        showToast(`已给 ${selectedTeacherGroup.groupName} 的 ${groupStudents.length} 个学生创建班级任务`);
+      } else {
+        const task = await createTask(taskForm);
+        await loadDashboard();
+        setSelectedStudentId(task.studentId);
+        setSelectedTeacherGroup(null);
+        setIsPendingReviewListOpen(false);
+        setLocatedTaskId(task.id);
+      }
       setTaskForm({
         ...emptyTaskForm,
-        studentId: taskForm.studentId
+        studentId: taskForm.studentId,
+        dueDate: getDefaultTaskDueDate()
       });
       setIsTaskFormOpen(false);
     } catch {
-      setTaskFormError("任务保存失败，请检查学生和标题。");
+      setTaskFormError(taskFormMode === "group" ? "班级任务保存失败，请确认后端服务正常。" : "任务保存失败，请检查学生和标题。");
     } finally {
       setIsSavingTask(false);
     }
@@ -591,8 +854,8 @@ function App() {
 
   async function handleUploadAssignment(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!assignmentTaskId || !assignmentFile) {
-      setAssignmentError("请先选择要上传的作业文件。");
+    if (!assignmentTaskId || assignmentFiles.length === 0) {
+      setAssignmentError("请先选择要上传的作业/答案文件。");
       return;
     }
 
@@ -601,25 +864,35 @@ function App() {
     setIsSavingAssignment(true);
 
     try {
-      await uploadTaskFile(assignmentTaskId, {
-        file: assignmentFile,
-        uploaderId: task?.studentId ?? "student",
-        uploaderRole: "student",
-        compressImage: assignmentFile.type.startsWith("image/")
-          ? {
-              maxSide: 1600,
-              quality: 0.78,
-              minBytes: 180 * 1024
-            }
-          : false
-      });
+      await runWithConcurrency(
+        assignmentFiles,
+        3,
+        async (file) => {
+          await uploadTaskFile(assignmentTaskId, {
+            file,
+            uploaderId: task?.studentId ?? "student",
+            uploaderRole: "student",
+            compressImage: file.type.startsWith("image/")
+              ? {
+                  maxSide: 1600,
+                  quality: 0.78,
+                  minBytes: 180 * 1024
+                }
+              : false
+          });
+        }
+      );
       await updateTask(assignmentTaskId, {
         status: "submitted"
       });
       await loadDashboard();
-      if (task) locateTask(task.id, task.studentId);
+      if (isPendingReviewListOpen) {
+        setLocatedTaskId(null);
+      } else if (task) {
+        locateTask(task.id, task.studentId);
+      }
       setAssignmentTaskId(null);
-      setAssignmentFile(null);
+      setAssignmentFiles([]);
     } catch {
       setAssignmentError("作业上传失败，请确认文件和后端服务正常。");
     } finally {
@@ -661,11 +934,15 @@ function App() {
         }
       );
       await updateTask(correctionTaskId, {
-        status: "reviewed",
+        status: "completed",
         teacherComment: correctionNote
       });
       await loadDashboard();
-      if (task) locateTask(task.id, task.studentId);
+      if (isPendingReviewListOpen) {
+        setLocatedTaskId(null);
+      } else if (task) {
+        locateTask(task.id, task.studentId);
+      }
       setCorrectionTaskId(null);
       setCorrectionFiles([]);
       setCorrectionNote("");
@@ -703,6 +980,7 @@ function App() {
       await loadDashboard();
       if (selectedStudentId === deleteStudentId) {
         setSelectedStudentId("all");
+        setIsPendingReviewListOpen(false);
         setLocatedTaskId(null);
       }
       setDeleteStudentId(null);
@@ -739,6 +1017,8 @@ function App() {
 
   function clearSelectedStudent() {
     setSelectedStudentId("all");
+    setSelectedTeacherGroup(null);
+    setIsPendingReviewListOpen(false);
     setLocatedTaskId(null);
   }
 
@@ -751,6 +1031,100 @@ function App() {
     } catch {
       window.alert("修改学生班级失败，请确认后端服务正常。");
     }
+  }
+
+  function startStudentArchiveDrag(event: DragEvent<HTMLElement>, payload: StudentArchiveDragPayload) {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData(studentArchiveDragMime, JSON.stringify(payload));
+  }
+
+  function readStudentArchiveDrag(event: DragEvent<HTMLElement>) {
+    try {
+      const value = event.dataTransfer.getData(studentArchiveDragMime);
+      if (!value) return null;
+      return JSON.parse(value) as StudentArchiveDragPayload;
+    } catch {
+      return null;
+    }
+  }
+
+  function handleStudentArchiveDragOver(event: DragEvent<HTMLElement>, targetKey: string) {
+    if (!Array.from(event.dataTransfer.types).includes(studentArchiveDragMime)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setDragTargetKey(targetKey);
+  }
+
+  function handleStudentArchiveDragLeave(event: DragEvent<HTMLElement>, targetKey: string) {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setDragTargetKey((current) => (current === targetKey ? null : current));
+  }
+
+  function finishStudentArchiveDrag() {
+    setDragTargetKey(null);
+  }
+
+  async function moveStudentToTarget(studentId: string, teacherName: string, groupName: string) {
+    const student = dashboardRef.current?.students.find((item) => item.id === studentId);
+    if (!student) return;
+    const nextGroupName = groupName.trim() || student.group || "未分班";
+    if (student.teacherName === teacherName && (student.group || "未分班") === nextGroupName) return;
+
+    try {
+      const updatedStudent = await updateStudent(studentId, { teacherName, group: nextGroupName });
+      setExpandedTeachers((current) => new Set(current).add(updatedStudent.teacherId));
+      setExpandedStudentGroups((current) => new Set(current).add(`${updatedStudent.teacherId}::${updatedStudent.group || "未分班"}`));
+      await loadDashboard({ force: true });
+      showToast(`${student.name} 已移动到 ${teacherName} / ${nextGroupName}`);
+    } catch {
+      showToast("移动学生失败：请确认目标老师或班级仍然存在，后端服务正常。", "error");
+    }
+  }
+
+  async function moveGroupToTeacher(currentTeacherId: string, groupName: string, nextTeacherId: string, nextTeacherName: string) {
+    if (currentTeacherId === nextTeacherId) return;
+
+    try {
+      const result = await moveTeacherGroup(currentTeacherId, { groupName, nextTeacherId });
+      setExpandedTeachers((current) => new Set(current).add(result.teacherId));
+      setExpandedStudentGroups((current) => new Set(current).add(`${result.teacherId}::${result.groupName}`));
+      if (selectedTeacherGroup?.teacherId === currentTeacherId && selectedTeacherGroup.groupName === groupName) {
+        setSelectedTeacherGroup({ teacherId: result.teacherId, teacherName: nextTeacherName, groupName: result.groupName });
+      }
+      await loadDashboard({ force: true });
+      showToast(`${groupName} 班级已移动到 ${nextTeacherName}`);
+    } catch {
+      showToast("移动班级失败：请确认目标老师仍然存在，且该班级还有学生。", "error");
+    }
+  }
+
+  async function handleDropOnTeacher(event: DragEvent<HTMLElement>, teacherId: string, teacherName: string) {
+    event.preventDefault();
+    const payload = readStudentArchiveDrag(event);
+    finishStudentArchiveDrag();
+    if (!payload) return;
+
+    if (payload.type === "group") {
+      await moveGroupToTeacher(payload.teacherId, payload.groupName, teacherId, teacherName);
+      return;
+    }
+
+    const student = dashboardRef.current?.students.find((item) => item.id === payload.studentId);
+    await moveStudentToTarget(payload.studentId, teacherName, student?.group || "未分班");
+  }
+
+  async function handleDropOnGroup(event: DragEvent<HTMLElement>, teacherId: string, teacherName: string, groupName: string) {
+    event.preventDefault();
+    const payload = readStudentArchiveDrag(event);
+    finishStudentArchiveDrag();
+    if (!payload) return;
+
+    if (payload.type === "group") {
+      await moveGroupToTeacher(payload.teacherId, payload.groupName, teacherId, teacherName);
+      return;
+    }
+
+    await moveStudentToTarget(payload.studentId, teacherName, groupName);
   }
 
   async function handleRenameTeacher(teacherId: string, nextTeacherName: string) {
@@ -773,6 +1147,9 @@ function App() {
         next.add(`${teacherId}::${nextGroupName}`);
         return next;
       });
+      if (selectedTeacherGroup?.teacherId === teacherId && selectedTeacherGroup.groupName === currentGroupName) {
+        setSelectedTeacherGroup((current) => (current ? { ...current, groupName: nextGroupName } : current));
+      }
       await loadDashboard();
     } catch {
       window.alert("修改班级名字失败，请确认后端服务正常。");
@@ -803,6 +1180,13 @@ function App() {
       });
       if (selectedStudent?.teacherId === teacherId && selectedStudent.group === groupName) {
         setSelectedStudentId("all");
+        setIsPendingReviewListOpen(false);
+        setLocatedTaskId(null);
+      }
+      if (selectedTeacherGroup?.teacherId === teacherId && selectedTeacherGroup.groupName === groupName) {
+        setSelectedTeacherGroup(null);
+        setSelectedStudentId("all");
+        setIsPendingReviewListOpen(false);
         setLocatedTaskId(null);
       }
     } catch {
@@ -927,11 +1311,61 @@ function App() {
     });
   }
 
+  function openTeacherDailyFeedbackForm() {
+    const selectedTasks = dashboard?.tasks.filter((task) => task.studentId === selectedStudentId) ?? [];
+    const availableDates = Array.from(new Set(selectedTasks.map((task) => getTaskDateKey(task.dueDate)).filter(Boolean))).sort().reverse();
+    setDailyFeedbackDate(availableDates[0] ?? getTodayDateInputValue());
+    setDailyFeedbackError("");
+    setIsDailyFeedbackFormOpen(true);
+  }
+
+  async function handleTeacherDownloadDailyFeedback(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (selectedStudentId === "all" || !selectedTeacherStudent || !dailyFeedbackDate) return;
+
+    setIsDownloadingDailyFeedback(true);
+    setDailyFeedbackError("");
+    try {
+      const fallbackFileName = `${sanitizeDownloadFileName(selectedTeacherStudent.name, "学生")}-${dailyFeedbackDate}-当日全部作业反馈.pdf`;
+      const { blob, fileName } = await downloadDailyFeedbackPdf(selectedStudentId, dailyFeedbackDate, fallbackFileName);
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+      setIsDailyFeedbackFormOpen(false);
+    } catch {
+      setDailyFeedbackError("这一天没有可导出的任务，或后端 PDF 生成失败。");
+    } finally {
+      setIsDownloadingDailyFeedback(false);
+    }
+  }
+
   function openTaskForm() {
     const fallbackStudentId = dashboard?.students[0]?.id ?? "";
+    setTaskFormMode("student");
     setTaskForm({
       ...emptyTaskForm,
-      studentId: selectedStudentId === "all" ? fallbackStudentId : selectedStudentId
+      studentId: selectedStudentId === "all" ? fallbackStudentId : selectedStudentId,
+      dueDate: getDefaultTaskDueDate()
+    });
+    setTaskFormError("");
+    setIsTaskFormOpen(true);
+  }
+
+  function openGroupTaskForm() {
+    const groupStudents =
+      dashboard?.students.filter(
+        (student) => selectedTeacherGroup && student.teacherId === selectedTeacherGroup.teacherId && student.group === selectedTeacherGroup.groupName
+      ) ?? [];
+    setTaskFormMode("group");
+    setTaskForm({
+      ...emptyTaskForm,
+      studentId: groupStudents[0]?.id ?? "",
+      dueDate: getDefaultTaskDueDate()
     });
     setTaskFormError("");
     setIsTaskFormOpen(true);
@@ -939,8 +1373,29 @@ function App() {
 
   function openAssignmentForm(taskId: string) {
     setAssignmentTaskId(taskId);
-    setAssignmentFile(null);
+    setAssignmentFiles([]);
     setAssignmentError("");
+  }
+
+  function handleAssignmentFilesChange(files: FileList | null) {
+    const selectedFiles = Array.from(files ?? []);
+    if (selectedFiles.length === 0) return;
+
+    setAssignmentFiles((current) => {
+      const nextFiles = [...current];
+      selectedFiles.forEach((file) => {
+        const duplicate = nextFiles.some(
+          (item) => item.name === file.name && item.size === file.size && item.lastModified === file.lastModified
+        );
+        if (!duplicate) nextFiles.push(file);
+      });
+      setAssignmentError("");
+      return nextFiles;
+    });
+  }
+
+  function removeAssignmentFile(index: number) {
+    setAssignmentFiles((current) => current.filter((_, itemIndex) => itemIndex !== index));
   }
 
   function openCorrectionForm(taskId: string) {
@@ -1032,14 +1487,47 @@ function App() {
     );
   }
 
-  const selectedStudentTasks =
-    selectedStudentId === "all"
+  const selectedGroupStudents = selectedTeacherGroup
+    ? dashboard.students.filter((student) => student.teacherId === selectedTeacherGroup.teacherId && student.group === selectedTeacherGroup.groupName)
+    : [];
+  const selectedGroupStudentIds = new Set(selectedGroupStudents.map((student) => student.id));
+  const tasksWithCorrection = new Set(
+    dashboard.taskFiles
+      .filter((file) => file.uploaderRole === "assistant" && file.fileType.startsWith("image/"))
+      .map((file) => file.taskId)
+  );
+  const selectedStudentTasks = isPendingReviewListOpen
+    ? dashboard.tasks.filter((task) => task.status !== "completed" && !tasksWithCorrection.has(task.id))
+    : selectedTeacherGroup
+    ? dashboard.tasks.filter((task) => selectedGroupStudentIds.has(task.studentId))
+    : selectedStudentId === "all"
       ? dashboard.tasks
       : dashboard.tasks.filter((task) => task.studentId === selectedStudentId);
-  const orderedSelectedStudentTasks = selectedStudentId === "all" ? selectedStudentTasks : sortTasksByLatest(selectedStudentTasks);
+  const orderedSelectedStudentTasks =
+    selectedStudentId === "all" && !selectedTeacherGroup && !isPendingReviewListOpen ? selectedStudentTasks : sortTasksByLatest(selectedStudentTasks);
+  const isDefaultTaskOverview = selectedStudentId === "all" && !selectedTeacherGroup && !isPendingReviewListOpen;
+  const taskPreviewLimit = isDefaultTaskOverview ? 5 : 3;
   const visibleSelectedStudentTasks =
-    selectedStudentId === "all" || isTaskListExpanded ? orderedSelectedStudentTasks : orderedSelectedStudentTasks.slice(0, 3);
-  const teacherGroups = groupStudentsByTeacher(dashboard.students);
+    isPendingReviewListOpen || isTaskListExpanded
+      ? orderedSelectedStudentTasks
+      : orderedSelectedStudentTasks.slice(0, taskPreviewLimit);
+  const selectedTeacherStudent = selectedStudentId === "all" ? undefined : dashboard.students.find((student) => student.id === selectedStudentId);
+  const teacherFeedbackDates = Array.from(new Set(selectedStudentTasks.map((task) => getTaskDateKey(task.dueDate)).filter(Boolean))).sort().reverse();
+  const teacherGroups = groupStudentsByTeacher(dashboard.students, dashboard.users);
+  const normalizedStudentSearch = studentSearchQuery.trim().toLowerCase();
+  const filteredTeacherGroups = normalizedStudentSearch
+    ? teacherGroups
+        .map((teacher) => ({
+          ...teacher,
+          groups: teacher.groups
+            .map((group) => ({
+              ...group,
+              students: group.students.filter((student) => student.name.toLowerCase().includes(normalizedStudentSearch))
+            }))
+            .filter((group) => group.students.length > 0)
+        }))
+        .filter((teacher) => teacher.groups.length > 0)
+    : teacherGroups;
   const visibleAuditLogs = isAuditExpanded ? dashboard.auditLogs : dashboard.auditLogs.slice(0, 5);
   return (
     <main className="app-shell">
@@ -1052,6 +1540,14 @@ function App() {
       >
         <ArrowLeft size={16} />
         返回主界面
+      </button>
+      <button
+        type="button"
+        className="teacher-guide-button"
+        onClick={() => setIsTeacherGuidePreviewOpen(true)}
+      >
+        <BookOpenCheck size={15} />
+        使用说明
       </button>
       <section className="top-dashboard">
         <div className="top-dashboard-main">
@@ -1084,6 +1580,8 @@ function App() {
               helper="查看全部学生任务"
               onClick={() => {
                 setSelectedStudentId("all");
+                setSelectedTeacherGroup(null);
+                setIsPendingReviewListOpen(false);
                 setLocatedTaskId(null);
               }}
             />
@@ -1091,7 +1589,7 @@ function App() {
               icon={<BookOpenCheck />}
               label="待批改"
               value={dashboard.summary.pendingReview}
-              helper="跳转到对应学生任务"
+              helper="查看全部待批改任务"
               onClick={locatePendingReviewTask}
             />
             <Metric
@@ -1099,6 +1597,7 @@ function App() {
               label="打印队列"
               value={dashboard.summary.pendingPrintJobs}
               helper="添加打印文件"
+              highlight={isTeacherGuideOpen && teacherGuideStep === 2}
               onClick={() => {
                 setPrintError("");
                 setIsPrintFormOpen(true);
@@ -1111,9 +1610,11 @@ function App() {
             files={dashboard.sharedFiles}
             error={sharedFileError}
             uploadFile={sharedFileUpload}
+            searchQuery={sharedFileSearchQuery}
             isSaving={isSavingSharedFile}
             deletingFileId={deletingSharedFileId}
             onFileChange={setSharedFileUpload}
+            onSearchChange={setSharedFileSearchQuery}
             onSubmit={handleCreateSharedFile}
             onPreview={(file) => setPreviewFile({ name: file.fileName, url: file.fileUrl, fileType: file.fileType })}
             onDelete={(sharedFileId) => void handleDeleteSharedFile(sharedFileId)}
@@ -1122,6 +1623,8 @@ function App() {
             jobs={dashboard.printJobs}
             deletingPrintJobId={deletingPrintJobId}
             pendingCount={dashboard.summary.pendingPrintJobs}
+            searchQuery={printQueueSearchQuery}
+            onSearchChange={setPrintQueueSearchQuery}
             onStatusChange={(jobId, status) => void handlePrintStatusChange(jobId, status)}
             onDelete={(jobId) => void handleDeletePrintJob(jobId)}
           />
@@ -1134,22 +1637,45 @@ function App() {
             <span>学生档案</span>
             <ShieldCheck size={18} />
           </div>
-          <button className="add-student-button" onClick={() => setIsStudentFormOpen(true)}>
+          <button
+            className={isTeacherGuideOpen && teacherGuideStep === 0 ? "add-student-button guide-highlight" : "add-student-button"}
+            onClick={() => setIsStudentFormOpen(true)}
+          >
             <Plus size={17} />
             添加学生
           </button>
+          <label className="student-search-box">
+            <span>搜索学生</span>
+            <input
+              value={studentSearchQuery}
+              onChange={(event) => setStudentSearchQuery(event.target.value)}
+              placeholder="输入学生姓名"
+              aria-label="搜索学生姓名"
+            />
+          </label>
           <button
-            className={selectedStudentId === "all" ? "student-item active" : "student-item"}
+            className={selectedStudentId === "all" && !selectedTeacherGroup && !isPendingReviewListOpen ? "student-item active" : "student-item"}
             onClick={() => {
               setSelectedStudentId("all");
+              setSelectedTeacherGroup(null);
+              setIsPendingReviewListOpen(false);
               setLocatedTaskId(null);
             }}
           >
             <strong>全部学生</strong>
           </button>
+          <p className="archive-quick-tip">拖动学生或班级可移动到其他老师/班级；小齿轮可修改名称。</p>
           <div className="student-group-list">
-            {teacherGroups.map(({ teacherId, teacherName, groups }) => {
-              const teacherExpanded = expandedTeachers.has(teacherId) || groups.some(({ students }) => students.some((student) => student.id === selectedStudentId));
+            {filteredTeacherGroups.length === 0 && (
+              <div className="student-search-empty">
+                <strong>没有找到学生</strong>
+                <span>换一个姓名关键词试试。</span>
+              </div>
+            )}
+            {filteredTeacherGroups.map(({ teacherId, teacherName, groups }) => {
+              const hasSelectedStudentInTeacher = groups.some(({ students }) => students.some((student) => student.id === selectedStudentId));
+              const hasSelectedGroupInTeacher = selectedTeacherGroup?.teacherId === teacherId;
+              const teacherExpanded = Boolean(normalizedStudentSearch) || expandedTeachers.has(teacherId) || hasSelectedStudentInTeacher || hasSelectedGroupInTeacher;
               return (
                 <section key={teacherId} className="student-group teacher-group">
                   <TeacherFolderRow
@@ -1157,20 +1683,32 @@ function App() {
                     studentCount={groups.reduce((total, group) => total + group.students.length, 0)}
                     expanded={teacherExpanded}
                     onToggle={() => {
-                      const hasSelectedStudentInTeacher = groups.some(({ students }) => students.some((student) => student.id === selectedStudentId));
-                      if (teacherExpanded && hasSelectedStudentInTeacher) {
-                        clearSelectedStudent();
+                      if (teacherExpanded) {
+                        toggleTeacher(teacherId);
+                        if (hasSelectedStudentInTeacher || hasSelectedGroupInTeacher) {
+                          clearSelectedStudent();
+                        }
                         return;
                       }
                       toggleTeacher(teacherId);
                     }}
                     onRename={(nextTeacherName) => void handleRenameTeacher(teacherId, nextTeacherName)}
+                    dropActive={dragTargetKey === `teacher:${teacherId}`}
+                    onDragOver={(event) => handleStudentArchiveDragOver(event, `teacher:${teacherId}`)}
+                    onDragLeave={(event) => handleStudentArchiveDragLeave(event, `teacher:${teacherId}`)}
+                    onDrop={(event) => void handleDropOnTeacher(event, teacherId, teacherName)}
                   />
                   {teacherExpanded && (
                     <div className="student-group-body teacher-group-body">
                       {groups.map(({ groupName, students }) => {
                         const groupKey = `${teacherId}::${groupName}`;
-                        const isExpanded = expandedStudentGroups.has(groupKey) || students.some((student) => student.id === selectedStudentId);
+                        const isSelectedGroup =
+                          selectedTeacherGroup?.teacherId === teacherId && selectedTeacherGroup.groupName === groupName;
+                        const isExpanded =
+                          Boolean(normalizedStudentSearch) ||
+                          expandedStudentGroups.has(groupKey) ||
+                          isSelectedGroup ||
+                          students.some((student) => student.id === selectedStudentId);
                         return (
                           <section key={groupKey} className="student-group nested-group">
                             <div className="student-group-header">
@@ -1180,13 +1718,28 @@ function App() {
                                 expanded={isExpanded}
                                 onToggle={() => {
                                   const hasSelectedStudentInGroup = students.some((student) => student.id === selectedStudentId);
-                                  if (isExpanded && hasSelectedStudentInGroup) {
-                                    clearSelectedStudent();
+                                  if (isExpanded) {
+                                    toggleStudentGroup(groupKey);
+                                    if (hasSelectedStudentInGroup || isSelectedGroup) {
+                                      clearSelectedStudent();
+                                    }
                                     return;
                                   }
+                                  setSelectedTeacherGroup({ teacherId, teacherName, groupName });
+                                  setSelectedStudentId("all");
+                                  setIsPendingReviewListOpen(false);
+                                  setLocatedTaskId(null);
                                   toggleStudentGroup(groupKey);
                                 }}
                                 onRename={(nextGroupName) => void handleRenameTeacherGroup(teacherId, groupName, nextGroupName)}
+                                draggable
+                                selected={isSelectedGroup}
+                                dropActive={dragTargetKey === `group:${groupKey}`}
+                                onDragStart={(event) => startStudentArchiveDrag(event, { type: "group", teacherId, groupName })}
+                                onDragEnd={finishStudentArchiveDrag}
+                                onDragOver={(event) => handleStudentArchiveDragOver(event, `group:${groupKey}`)}
+                                onDragLeave={(event) => handleStudentArchiveDragLeave(event, `group:${groupKey}`)}
+                                onDrop={(event) => void handleDropOnGroup(event, teacherId, teacherName, groupName)}
                               />
                               <button
                                 type="button"
@@ -1212,11 +1765,16 @@ function App() {
                                         return;
                                       }
                                       setSelectedStudentId(student.id);
+                                      setSelectedTeacherGroup(null);
+                                      setIsPendingReviewListOpen(false);
                                       setLocatedTaskId(null);
                                     }}
                                     onDelete={() => setDeleteStudentId(student.id)}
                                     onUpdateGroup={(groupName) => void handleUpdateStudentGroup(student.id, groupName)}
                                     onRename={(nextStudentName) => void handleRenameStudent(student.id, nextStudentName)}
+                                    draggable
+                                    onDragStart={(event) => startStudentArchiveDrag(event, { type: "student", studentId: student.id })}
+                                    onDragEnd={finishStudentArchiveDrag}
                                   />
                                 ))}
                               </div>
@@ -1229,6 +1787,16 @@ function App() {
                 </section>
               );
             })}
+            <button
+              className={isTeacherGuideOpen && teacherGuideStep === 0 ? "add-teacher-button guide-highlight" : "add-teacher-button"}
+              onClick={() => {
+                setTeacherFormError("");
+                setIsTeacherFormOpen(true);
+              }}
+            >
+              <Plus size={15} />
+              添加老师
+            </button>
           </div>
         </aside>
 
@@ -1236,24 +1804,55 @@ function App() {
           <div className="board-header">
             <div>
               <p className="eyebrow">Task Queue</p>
-              <h2>{selectedStudentId === "all" ? "任务队列" : `任务队列--${dashboard.students.find((student) => student.id === selectedStudentId)?.name ?? ""}`}</h2>
+              <div className="student-task-title-row">
+                <h2>
+                  {selectedTeacherGroup
+                    ? `任务队列-${selectedTeacherGroup.groupName}`
+                    : isPendingReviewListOpen
+                      ? "任务队列-待批改"
+                      : selectedStudentId === "all"
+                        ? "任务队列"
+                        : `任务队列--${selectedTeacherStudent?.name ?? ""}`}
+                </h2>
+                {selectedTeacherStudent && (
+                  <button type="button" className="daily-feedback-button" onClick={openTeacherDailyFeedbackForm}>
+                    <Download size={16} />
+                    导出当日反馈
+                  </button>
+                )}
+              </div>
               <p className="board-hint">助教可以在任务卡片中上传批改后的作业，并把任务状态更新为已批改。</p>
             </div>
-            <button className="primary-action" onClick={openTaskForm}>
-              <UploadCloud size={18} />
-              新建任务
-            </button>
+            <div className="board-header-actions">
+              {selectedTeacherGroup && (
+                <button className="secondary-action" onClick={openGroupTaskForm}>
+                  <ClipboardList size={18} />
+                  创建班级任务
+                </button>
+              )}
+              <button className={isTeacherGuideOpen && teacherGuideStep === 1 ? "primary-action guide-highlight" : "primary-action"} onClick={openTaskForm}>
+                <UploadCloud size={18} />
+                新建任务
+              </button>
+            </div>
           </div>
 
           <div className="task-list">
             {selectedStudentTasks.length === 0 && (
               <div className="empty-state">
-                <strong>当前学生还没有任务</strong>
-                <span>可以新建任务，或者选择其他学生档案查看。</span>
+                <strong>{isPendingReviewListOpen ? "当前没有待批改任务" : selectedTeacherGroup ? "当前班级还没有任务" : "当前学生还没有任务"}</strong>
+                <span>
+                  {isPendingReviewListOpen
+                    ? "所有未完成且还没有助教批改图片的任务，都会出现在这里。"
+                    : selectedTeacherGroup
+                      ? "可以创建班级任务，或选择其他班级查看。"
+                      : "可以新建任务，或者选择其他学生档案查看。"}
+                </span>
               </div>
             )}
             {visibleSelectedStudentTasks.map((task) => {
               const files = dashboard.taskFiles.filter((file) => file.taskId === task.id);
+              const taskStudent = dashboard.students.find((student) => student.id === task.studentId);
               return (
                 <article
                   id={`task-${task.id}`}
@@ -1263,24 +1862,70 @@ function App() {
                   <button className="delete-task-button" onClick={() => setDeleteTaskId(task.id)} aria-label="删除任务">
                     <X size={16} />
                   </button>
-                  <div className="task-main">
-                    <h3>{task.title}</h3>
-                    {task.description && <p>{task.description}</p>}
-                    <TeacherNoteEditor task={task} onSave={loadDashboard} />
+                  <TaskCompletionToggle
+                    task={task}
+                    disabled={updatingTaskStatusId === task.id}
+                    onChange={async (status) => {
+                      const previousTask = task;
+                      mergeTaskIntoDashboard({ ...task, status });
+                      setUpdatingTaskStatusId(task.id);
+                      try {
+                        const savedTask = await updateTask(task.id, { status });
+                        mergeTaskIntoDashboard(savedTask);
+                        window.setTimeout(() => {
+                          void loadDashboard({ silent: true });
+                        }, 1200);
+                      } catch {
+                        mergeTaskIntoDashboard(previousTask);
+                        showToast("任务状态更新失败，请确认后端服务正常。", "error");
+                      } finally {
+                        setUpdatingTaskStatusId(null);
+                      }
+                    }}
+                  />
+                  <div className="task-card-body">
+                    <div className="task-main">
+                      <TaskTitleEditor task={task} onSave={mergeTaskIntoDashboard} />
+                      <div className="task-meta">
+                        {taskStudent && <span>学生 {taskStudent.name}</span>}
+                        <span>DDL {formatTaskDueDate(task.dueDate)}</span>
+                      </div>
+                      {task.description && <p>{task.description}</p>}
+                      <TaskFileGallery
+                        files={files}
+                        section="assignment"
+                        deletingFileId={deletingFileId}
+                        onDeleteFile={(fileId) => void handleDeleteFile(fileId)}
+                        onPreview={setPreviewFile}
+                      />
+                    </div>
+
+                    <div className="task-review-column">
+                      <TaskFileGallery
+                        files={files}
+                        section="correction"
+                        deletingFileId={deletingFileId}
+                        onDeleteFile={(fileId) => void handleDeleteFile(fileId)}
+                        onPreview={setPreviewFile}
+                      />
+                      <TeacherNoteEditor task={task} onSave={mergeTaskIntoDashboard} />
+                    </div>
                   </div>
 
-                  <div className="task-actions">
-                    <TaskFileGallery
-                      files={files}
-                      deletingFileId={deletingFileId}
-                      onDeleteFile={(fileId) => void handleDeleteFile(fileId)}
-                      onPreview={setPreviewFile}
-                    />
+                  <div className="task-action-bar">
+                    <button onClick={() => openAssignmentForm(task.id)} disabled={busyTaskId === task.id}>
+                      <BookOpenCheck size={16} />
+                      参考答案
+                    </button>
                     <button onClick={() => openAssignmentForm(task.id)} disabled={busyTaskId === task.id}>
                       <UploadCloud size={16} />
                       上传作业
                     </button>
-                    <button onClick={() => openCorrectionForm(task.id)} disabled={busyTaskId === task.id}>
+                    <button
+                      className={isTeacherGuideOpen && teacherGuideStep === 2 ? "guide-highlight" : undefined}
+                      onClick={() => openCorrectionForm(task.id)}
+                      disabled={busyTaskId === task.id}
+                    >
                       <Camera size={16} />
                       上传批改
                     </button>
@@ -1293,9 +1938,9 @@ function App() {
               );
             })}
           </div>
-          {selectedStudentId !== "all" && orderedSelectedStudentTasks.length > 3 && (
+          {!isPendingReviewListOpen && orderedSelectedStudentTasks.length > taskPreviewLimit && (
             <button type="button" className="audit-toggle-button" onClick={() => setIsTaskListExpanded((current) => !current)}>
-              {isTaskListExpanded ? "收起任务" : `展开更多（${orderedSelectedStudentTasks.length - 3} 条）`}
+              {isTaskListExpanded ? "收起任务" : `展开更多（${orderedSelectedStudentTasks.length - taskPreviewLimit} 条）`}
             </button>
           )}
         </section>
@@ -1334,8 +1979,104 @@ function App() {
         )}
       </section>
 
+      {isTeacherGuideOpen && (
+        <aside className="teacher-onboarding-card" aria-live="polite">
+          <div>
+            <p className="eyebrow">Quick Start</p>
+            <h2>{teacherOnboardingSteps[teacherGuideStep].title}</h2>
+            <span>{teacherOnboardingSteps[teacherGuideStep].text}</span>
+          </div>
+          <div className="teacher-onboarding-progress">
+            {teacherOnboardingSteps.map((step, index) => (
+              <button
+                key={step.title}
+                type="button"
+                className={index === teacherGuideStep ? "active" : ""}
+                onClick={() => setTeacherGuideStep(index)}
+                aria-label={`查看第 ${index + 1} 步`}
+              />
+            ))}
+          </div>
+          <div className="teacher-onboarding-actions">
+            <button
+              type="button"
+              className="ghost-guide-action"
+              onClick={() => setIsTeacherGuidePreviewOpen(true)}
+            >
+              预览说明书
+            </button>
+            {teacherGuideStep < teacherOnboardingSteps.length - 1 ? (
+              <button type="button" className="solid-guide-action" onClick={() => setTeacherGuideStep((current) => current + 1)}>
+                下一步
+              </button>
+            ) : (
+              <button type="button" className="solid-guide-action" onClick={closeTeacherGuide}>
+                开始使用
+              </button>
+            )}
+          </div>
+          <button type="button" className="teacher-onboarding-close" onClick={closeTeacherGuide} aria-label="关闭首次引导">
+            <X size={15} />
+          </button>
+        </aside>
+      )}
+
+      {toast && <div className={`toast-message ${toast.tone}`}>{toast.message}</div>}
+
+      {isTeacherGuidePreviewOpen && <GuidePreviewModal onClose={() => setIsTeacherGuidePreviewOpen(false)} />}
+
       {previewFile && (
         <FilePreviewModal file={previewFile} onClose={() => setPreviewFile(null)} />
+      )}
+
+      {isDailyFeedbackFormOpen && selectedTeacherStudent && (
+        <div className="modal-backdrop" role="presentation">
+          <form className="student-form compact-export-form" onSubmit={(event) => void handleTeacherDownloadDailyFeedback(event)}>
+            <div className="form-header">
+              <div>
+                <p className="eyebrow">Daily PDF</p>
+                <h3>导出 {selectedTeacherStudent.name} 的全部作业反馈</h3>
+              </div>
+              <button type="button" onClick={() => setIsDailyFeedbackFormOpen(false)} aria-label="关闭导出弹窗">
+                <X size={18} />
+              </button>
+            </div>
+            <label>
+              选择 DDL 日期
+              <input
+                required
+                type="date"
+                value={dailyFeedbackDate}
+                list="teacher-daily-feedback-dates"
+                onChange={(event) => setDailyFeedbackDate(event.target.value)}
+              />
+              <datalist id="teacher-daily-feedback-dates">
+                {teacherFeedbackDates.map((date) => (
+                  <option key={date} value={date} />
+                ))}
+              </datalist>
+            </label>
+            {teacherFeedbackDates.length > 0 && (
+              <div className="feedback-date-chips">
+                {teacherFeedbackDates.slice(0, 6).map((date) => (
+                  <button
+                    key={date}
+                    type="button"
+                    className={date === dailyFeedbackDate ? "is-selected" : undefined}
+                    aria-pressed={date === dailyFeedbackDate}
+                    onClick={() => setDailyFeedbackDate(date)}
+                  >
+                    {date}
+                  </button>
+                ))}
+              </div>
+            )}
+            {dailyFeedbackError && <p className="form-error">{dailyFeedbackError}</p>}
+            <button className="submit-button" type="submit" disabled={isDownloadingDailyFeedback || !dailyFeedbackDate}>
+              {isDownloadingDailyFeedback ? "生成中..." : "生成并下载 PDF"}
+            </button>
+          </form>
+        </div>
       )}
 
       {isPrintFormOpen && (
@@ -1434,33 +2175,72 @@ function App() {
           </form>
         </div>
       )}
+      {isTeacherFormOpen && (
+        <div className="modal-backdrop" role="presentation">
+          <form className="student-form" onSubmit={(event) => void handleCreateTeacher(event)}>
+            <div className="form-header">
+              <div>
+                <p className="eyebrow">Teacher Profile</p>
+                <h2>添加老师</h2>
+              </div>
+              <button type="button" className="icon-button" onClick={() => setIsTeacherFormOpen(false)}>
+                <X size={18} />
+              </button>
+            </div>
+
+            <label>
+              老师姓名
+              <input
+                required
+                value={teacherFormName}
+                onChange={(event) => setTeacherFormName(event.target.value)}
+                placeholder="例如：Louise"
+              />
+            </label>
+
+            {teacherFormError && <p className="form-error">{teacherFormError}</p>}
+
+            <button className="submit-button" type="submit" disabled={isSavingTeacher}>
+              {isSavingTeacher ? "保存中..." : "保存到老师列表"}
+            </button>
+          </form>
+        </div>
+      )}
       {isTaskFormOpen && (
         <div className="modal-backdrop" role="presentation">
-          <form className="student-form" onSubmit={(event) => void handleCreateTask(event)}>
+          <form className="student-form task-setup-form" onSubmit={(event) => void handleCreateTask(event)}>
             <div className="form-header">
               <div>
                 <p className="eyebrow">Task Setup</p>
-                <h2>新建学生任务</h2>
+                <h2>{taskFormMode === "group" && selectedTeacherGroup ? `创建 ${selectedTeacherGroup.groupName} 班级任务` : "新建学生任务"}</h2>
               </div>
               <button type="button" className="icon-button" onClick={() => setIsTaskFormOpen(false)}>
                 <X size={18} />
               </button>
             </div>
 
-            <label>
-              选择学生
-              <select
-                required
-                value={taskForm.studentId}
-                onChange={(event) => setTaskForm({ ...taskForm, studentId: event.target.value })}
-              >
-                {dashboard.students.map((student) => (
-                  <option key={student.id} value={student.id}>
-                    {student.name}
-                  </option>
-                ))}
-              </select>
-            </label>
+            {taskFormMode === "student" ? (
+              <label>
+                选择学生
+                <select
+                  required
+                  value={taskForm.studentId}
+                  onChange={(event) => setTaskForm({ ...taskForm, studentId: event.target.value })}
+                >
+                  {dashboard.students.map((student) => (
+                    <option key={student.id} value={student.id}>
+                      {student.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <div className="class-task-target">
+                <span>目标班级</span>
+                <strong>{selectedTeacherGroup?.groupName}</strong>
+                <small>{selectedGroupStudents.length} 个学生会收到同一份任务</small>
+              </div>
+            )}
             <label>
               任务标题
               <input
@@ -1468,6 +2248,15 @@ function App() {
                 value={taskForm.title}
                 onChange={(event) => setTaskForm({ ...taskForm, title: event.target.value })}
                 placeholder="例如：Cambridge 18 Test 3 Reading Passage 2"
+              />
+            </label>
+            <label>
+              DDL
+              <input
+                required
+                type="datetime-local"
+                value={taskForm.dueDate}
+                onChange={(event) => setTaskForm({ ...taskForm, dueDate: event.target.value })}
               />
             </label>
             <label>
@@ -1489,8 +2278,8 @@ function App() {
 
             {taskFormError && <p className="form-error">{taskFormError}</p>}
 
-            <button className="submit-button" type="submit" disabled={isSavingTask || !dashboard.students.length}>
-              {isSavingTask ? "保存中..." : "保存到任务列表"}
+            <button className="submit-button" type="submit" disabled={isSavingTask || !dashboard.students.length || (taskFormMode === "group" && selectedGroupStudents.length === 0)}>
+              {isSavingTask ? "保存中..." : taskFormMode === "group" ? "保存到班级所有学生" : "保存到任务列表"}
             </button>
           </form>
         </div>
@@ -1501,7 +2290,7 @@ function App() {
             <div className="form-header">
               <div>
                 <p className="eyebrow">Assignment Upload</p>
-                <h2>上传作业文件</h2>
+                <h2>上传作业/答案</h2>
               </div>
               <button type="button" className="icon-button" onClick={() => setAssignmentTaskId(null)}>
                 <X size={18} />
@@ -1509,19 +2298,36 @@ function App() {
             </div>
 
             <label>
-              作业文件
+              作业/答案文件
               <input
                 required
+                multiple
                 type="file"
                 accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.mp3,.mp4"
-                onChange={(event) => setAssignmentFile(event.target.files?.[0] ?? null)}
+                onChange={(event) => handleAssignmentFilesChange(event.target.files)}
               />
             </label>
+            <p className="form-context">可以一次选择多份作业、答案或参考附件，也可以分几次补选，最后统一上传。</p>
+            {assignmentFiles.length > 0 && (
+              <>
+                <p className="form-context">已选择 {assignmentFiles.length} 个作业/答案文件</p>
+                <div className="selected-file-list">
+                  {assignmentFiles.map((file, index) => (
+                    <div key={`${file.name}-${file.lastModified}-${index}`} className="selected-file-item">
+                      <span title={file.name}>{file.name}</span>
+                      <button type="button" className="selected-file-remove" onClick={() => removeAssignmentFile(index)}>
+                        删除
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
 
             {assignmentError && <p className="form-error">{assignmentError}</p>}
 
             <button className="submit-button" type="submit" disabled={isSavingAssignment}>
-              {isSavingAssignment ? "上传中..." : "上传并标记为已提交"}
+              {isSavingAssignment ? "上传中..." : "上传作业/答案并标记为已提交"}
             </button>
           </form>
         </div>
@@ -1755,14 +2561,100 @@ function StudentPortal({
   onBack: () => void;
 }) {
   const [isTaskListExpanded, setIsTaskListExpanded] = useState(false);
+  const [studentSearchQuery, setStudentSearchQuery] = useState("");
+  const [expandedTeachers, setExpandedTeachers] = useState<Set<string>>(() => new Set());
+  const [expandedStudentGroups, setExpandedStudentGroups] = useState<Set<string>>(() => new Set());
+  const [draggingArchiveItem, setDraggingArchiveItem] = useState<{ type: "student" | "group"; studentId?: string; teacherId?: string; groupName?: string } | null>(null);
+  const [dragTargetKey, setDragTargetKey] = useState<string | null>(null);
+  const [isDailyFeedbackFormOpen, setIsDailyFeedbackFormOpen] = useState(false);
+  const [dailyFeedbackDate, setDailyFeedbackDate] = useState(getTodayDateInputValue());
+  const [dailyFeedbackError, setDailyFeedbackError] = useState("");
+  const [isDownloadingDailyFeedback, setIsDownloadingDailyFeedback] = useState(false);
   const sortedStudents = sortStudentsByGroup(dashboard.students);
-  const selectedStudent = sortedStudents.find((student) => student.id === selectedStudentId) ?? sortedStudents[0];
+  const selectedStudent = sortedStudents.find((student) => student.id === selectedStudentId);
   const selectedTasks = selectedStudent ? sortTasksByLatest(dashboard.tasks.filter((task) => task.studentId === selectedStudent.id)) : [];
   const visibleSelectedTasks = isTaskListExpanded ? selectedTasks : selectedTasks.slice(0, 3);
+  const availableFeedbackDates = Array.from(new Set(selectedTasks.map((task) => getTaskDateKey(task.dueDate)).filter(Boolean))).sort().reverse();
+  const teacherGroups = groupStudentsByTeacher(dashboard.students, dashboard.users);
+  const normalizedStudentSearch = studentSearchQuery.trim().toLowerCase();
+  const filteredTeacherGroups = normalizedStudentSearch
+    ? teacherGroups
+        .map((teacher) => ({
+          ...teacher,
+          groups: teacher.groups
+            .map((group) => ({
+              ...group,
+              students: group.students.filter((student) => student.name.toLowerCase().includes(normalizedStudentSearch))
+            }))
+            .filter((group) => group.students.length > 0)
+        }))
+        .filter((teacher) => teacher.groups.length > 0)
+    : teacherGroups;
 
   useEffect(() => {
     setIsTaskListExpanded(false);
   }, [selectedStudentId]);
+
+  function startStudentArchiveDrag(
+    event: DragEvent<HTMLElement>,
+    item: { type: "student" | "group"; studentId?: string; teacherId?: string; groupName?: string }
+  ) {
+    setDraggingArchiveItem(item);
+    event.dataTransfer.effectAllowed = "move";
+  }
+
+  function finishStudentArchiveDrag() {
+    setDraggingArchiveItem(null);
+    setDragTargetKey(null);
+  }
+
+  function handleStudentArchiveDragOver(event: DragEvent<HTMLElement>, key: string) {
+    if (!draggingArchiveItem) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setDragTargetKey(key);
+  }
+
+  function handleStudentArchiveDragLeave(event: DragEvent<HTMLElement>, key: string) {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null) && dragTargetKey === key) {
+      setDragTargetKey(null);
+    }
+  }
+
+  function completeReadonlyDrop() {
+    finishStudentArchiveDrag();
+  }
+
+  function openDailyFeedbackForm() {
+    setDailyFeedbackDate(availableFeedbackDates[0] ?? getTodayDateInputValue());
+    setDailyFeedbackError("");
+    setIsDailyFeedbackFormOpen(true);
+  }
+
+  async function handleDownloadDailyFeedback(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedStudent || !dailyFeedbackDate) return;
+
+    setIsDownloadingDailyFeedback(true);
+    setDailyFeedbackError("");
+    try {
+      const fallbackFileName = `${sanitizeDownloadFileName(selectedStudent.name, "学生")}-${dailyFeedbackDate}-当日全部作业反馈.pdf`;
+      const { blob, fileName } = await downloadDailyFeedbackPdf(selectedStudent.id, dailyFeedbackDate, fallbackFileName);
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+      setIsDailyFeedbackFormOpen(false);
+    } catch {
+      setDailyFeedbackError("这一天没有可导出的任务，或后端 PDF 生成失败。");
+    } finally {
+      setIsDownloadingDailyFeedback(false);
+    }
+  }
 
   return (
     <main className="app-shell student-portal-shell">
@@ -1786,23 +2678,134 @@ function StudentPortal({
             <ShieldCheck size={18} />
           </div>
           {dashboard.students.length === 0 && <p className="muted-copy">还没有学生档案，请先由老师添加。</p>}
-          {sortedStudents.map((student) => (
-            <button
-              key={student.id}
-              className={selectedStudent?.id === student.id ? "student-item active" : "student-item"}
-              onClick={() => onStudentChange(student.id)}
-            >
-              <strong>{student.name}</strong>
-              <small>{student.group || "No group"}</small>
-            </button>
-          ))}
+          <label className="student-search-box">
+            <span>搜索学生</span>
+            <input
+              value={studentSearchQuery}
+              onChange={(event) => setStudentSearchQuery(event.target.value)}
+              placeholder="输入学生姓名"
+              aria-label="搜索学生姓名"
+            />
+          </label>
+          <div className="student-group-list">
+            {filteredTeacherGroups.length === 0 && (
+              <div className="student-search-empty">
+                <strong>没有找到学生</strong>
+                <span>换一个姓名关键词试试。</span>
+              </div>
+            )}
+            {filteredTeacherGroups.map(({ teacherId, teacherName, groups }) => {
+              const hasSelectedStudentInTeacher = groups.some(({ students }) => students.some((student) => student.id === selectedStudent?.id));
+              const teacherExpanded = Boolean(normalizedStudentSearch) || expandedTeachers.has(teacherId) || hasSelectedStudentInTeacher;
+              return (
+                <section key={teacherId} className="student-group teacher-group">
+                  <TeacherFolderRow
+                    teacherName={teacherName}
+                    studentCount={groups.reduce((total, group) => total + group.students.length, 0)}
+                    expanded={teacherExpanded}
+                    onToggle={() => {
+                      if (teacherExpanded) {
+                        setExpandedTeachers((current) => {
+                          const next = new Set(current);
+                          next.delete(teacherId);
+                          return next;
+                        });
+                        if (hasSelectedStudentInTeacher) {
+                          onStudentChange("");
+                        }
+                        return;
+                      }
+                      setExpandedTeachers((current) => {
+                        const next = new Set(current);
+                        next.add(teacherId);
+                        return next;
+                      });
+                    }}
+                    dropActive={dragTargetKey === `teacher:${teacherId}`}
+                    onDragOver={(event) => handleStudentArchiveDragOver(event, `teacher:${teacherId}`)}
+                    onDragLeave={(event) => handleStudentArchiveDragLeave(event, `teacher:${teacherId}`)}
+                    onDrop={completeReadonlyDrop}
+                  />
+                  {teacherExpanded && (
+                    <div className="student-group-body teacher-group-body">
+                      {groups.map(({ groupName, students }) => {
+                        const groupKey = `${teacherId}::${groupName}`;
+                        const hasSelectedStudentInGroup = students.some((student) => student.id === selectedStudent?.id);
+                        const groupExpanded = Boolean(normalizedStudentSearch) || expandedStudentGroups.has(groupKey) || hasSelectedStudentInGroup;
+                        return (
+                          <section key={groupKey} className="student-group nested-group">
+                            <div className="student-group-header">
+                              <GroupFolderRow
+                                groupName={groupName}
+                                studentCount={students.length}
+                                expanded={groupExpanded}
+                                onToggle={() => {
+                                  if (groupExpanded) {
+                                    setExpandedStudentGroups((current) => {
+                                      const next = new Set(current);
+                                      next.delete(groupKey);
+                                      return next;
+                                    });
+                                    if (hasSelectedStudentInGroup) {
+                                      onStudentChange("");
+                                    }
+                                    return;
+                                  }
+                                  setExpandedStudentGroups((current) => {
+                                    const next = new Set(current);
+                                    next.add(groupKey);
+                                    return next;
+                                  });
+                                }}
+                                draggable
+                                dropActive={dragTargetKey === `group:${groupKey}`}
+                                onDragStart={(event) => startStudentArchiveDrag(event, { type: "group", teacherId, groupName })}
+                                onDragEnd={finishStudentArchiveDrag}
+                                onDragOver={(event) => handleStudentArchiveDragOver(event, `group:${groupKey}`)}
+                                onDragLeave={(event) => handleStudentArchiveDragLeave(event, `group:${groupKey}`)}
+                                onDrop={completeReadonlyDrop}
+                              />
+                            </div>
+                            {groupExpanded && (
+                              <div className="student-group-body">
+                                {students.map((student) => (
+                                  <StudentCard
+                                    key={student.id}
+                                    student={student}
+                                    active={selectedStudent?.id === student.id}
+                                    groupOptions={groups.map((group) => group.groupName)}
+                                    onSelect={() => onStudentChange(selectedStudent?.id === student.id ? "" : student.id)}
+                                    draggable
+                                    onDragStart={(event) => startStudentArchiveDrag(event, { type: "student", studentId: student.id })}
+                                    onDragEnd={finishStudentArchiveDrag}
+                                  />
+                                ))}
+                              </div>
+                            )}
+                          </section>
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+              );
+            })}
+          </div>
         </aside>
 
         <section className="task-board student-task-board">
           <div className="board-header">
             <div>
               <p className="eyebrow">Student Queue</p>
-              <h2>{selectedStudent ? `${selectedStudent.name} 的任务队列` : "请选择学生档案"}</h2>
+              <div className="student-task-title-row">
+                <h2>{selectedStudent ? `${selectedStudent.name} 的任务队列` : "请选择学生档案"}</h2>
+                {selectedStudent && (
+                  <button type="button" className="daily-feedback-button" onClick={openDailyFeedbackForm}>
+                    <Download size={16} />
+                    导出当日反馈
+                  </button>
+                )}
+              </div>
               <p className="board-hint">按任务状态和置顶情况查看任务。</p>
             </div>
           </div>
@@ -1826,12 +2829,13 @@ function StudentPortal({
             )}
             {selectedTasks.length === 0 && (
               <div className="empty-state">
-                <strong>当前还没有任务</strong>
-                <span>老师布置任务后，会自动出现在这里。</span>
+                <strong>{selectedStudent ? "当前还没有任务" : "请先选择学生档案"}</strong>
+                <span>{selectedStudent ? "老师布置任务后，会自动出现在这里。" : "在左侧点击自己的姓名后，会显示对应任务队列。"}</span>
               </div>
             )}
             {visibleSelectedTasks.map((task) => {
               const files = dashboard.taskFiles.filter((file) => file.taskId === task.id);
+              const taskStudent = dashboard.students.find((student) => student.id === task.studentId);
               return (
                 <article id={`student-task-${task.id}`} key={task.id} className="task-card student-task-card">
                   <div className="task-main">
@@ -1842,6 +2846,8 @@ function StudentPortal({
                     <h3>{task.title}</h3>
                     {task.description && <p>{task.description}</p>}
                     <div className="task-meta">
+                      {taskStudent && <span>学生 {taskStudent.name}</span>}
+                      <span>DDL {formatTaskDueDate(task.dueDate)}</span>
                       {task.score && <span>{task.score}</span>}
                     </div>
                     {task.teacherComment && (
@@ -1866,6 +2872,55 @@ function StudentPortal({
           )}
         </section>
       </section>
+      {isDailyFeedbackFormOpen && selectedStudent && (
+        <div className="modal-backdrop" role="presentation">
+          <form className="student-form compact-export-form" onSubmit={(event) => void handleDownloadDailyFeedback(event)}>
+            <div className="form-header">
+              <div>
+                <p className="eyebrow">Daily PDF</p>
+                <h3>导出 {selectedStudent.name} 的全部作业反馈</h3>
+              </div>
+              <button type="button" onClick={() => setIsDailyFeedbackFormOpen(false)} aria-label="关闭导出弹窗">
+                <X size={18} />
+              </button>
+            </div>
+            <label>
+              选择 DDL 日期
+              <input
+                required
+                type="date"
+                value={dailyFeedbackDate}
+                list="daily-feedback-dates"
+                onChange={(event) => setDailyFeedbackDate(event.target.value)}
+              />
+              <datalist id="daily-feedback-dates">
+                {availableFeedbackDates.map((date) => (
+                  <option key={date} value={date} />
+                ))}
+              </datalist>
+            </label>
+            {availableFeedbackDates.length > 0 && (
+              <div className="feedback-date-chips">
+                {availableFeedbackDates.slice(0, 6).map((date) => (
+                  <button
+                    key={date}
+                    type="button"
+                    className={date === dailyFeedbackDate ? "is-selected" : undefined}
+                    aria-pressed={date === dailyFeedbackDate}
+                    onClick={() => setDailyFeedbackDate(date)}
+                  >
+                    {date}
+                  </button>
+                ))}
+              </div>
+            )}
+            {dailyFeedbackError && <p className="form-error">{dailyFeedbackError}</p>}
+            <button className="submit-button" type="submit" disabled={isDownloadingDailyFeedback || !dailyFeedbackDate}>
+              {isDownloadingDailyFeedback ? "生成中..." : "生成并下载 PDF"}
+            </button>
+          </form>
+        </div>
+      )}
     </main>
   );
 }
@@ -1908,13 +2963,124 @@ function FilePreviewModal({
   );
 }
 
+function GuidePreviewModal({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div className="guide-preview-modal">
+        <div className="form-header">
+          <div>
+            <p className="eyebrow">Teacher Guide</p>
+            <h2>QULEDA 老师端使用说明</h2>
+          </div>
+          <button type="button" className="icon-button" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <section className="guide-preview-hero">
+          <strong>最快上手路径</strong>
+          <span>添加学生档案 → 新建任务 → 上传批改 / 标记结束 / 管理打印</span>
+        </section>
+
+        <div className="guide-preview-grid">
+          <article>
+            <b>1. 建立学生档案</b>
+            <p>在左侧点击“添加老师”或“添加学生”。学生会归到对应老师和班级下。</p>
+            <p>学生多的时候，可以用“搜索学生”直接按姓名定位。</p>
+          </article>
+          <article>
+            <b>2. 创建任务</b>
+            <p>选择学生后，点击右侧“新建任务”，填写任务名称和说明。</p>
+            <p>任务会进入任务队列，每张卡片都会显示对应学生姓名。</p>
+          </article>
+          <article>
+            <b>3. 上传批改或打印</b>
+            <p>在任务卡片点击“上传批改”，上传批改图片或文件并填写备注。</p>
+            <p>需要打印的资料可以加入打印队列，并在右侧更新打印状态。</p>
+          </article>
+          <article>
+            <b>待批改列表</b>
+            <p>点击顶部“待批改”，会显示全部还没有上传批改图片的任务。</p>
+            <p>如果任务无需批改，可在卡片右上角切换为“已结束”，它就不会继续出现在待批改列表。</p>
+          </article>
+          <article>
+            <b>常用文件框</b>
+            <p>右侧“常用文件框”可以保存讲义、模板和打印材料。</p>
+            <p>保存后老师和助教都能预览、下载或复用。</p>
+          </article>
+          <article>
+            <b>隐藏但常用的操作</b>
+            <p>小齿轮可以修改老师、班级、学生或任务名称。</p>
+            <p>拖动学生可以移动到其他班级；拖动班级可以移动到其他老师。</p>
+          </article>
+          <article>
+            <b>移动后的反馈</b>
+            <p>移动成功后页面会自动刷新，并在底部出现成功提示。</p>
+            <p>如果失败，会显示更明确的失败原因。</p>
+          </article>
+        </div>
+
+        <div className="guide-preview-footer">
+          <span>建议顺序：添加学生 → 新建任务 → 上传批改 → 打印 / 导出反馈。</span>
+          <button type="button" className="submit-button" onClick={onClose}>
+            我知道了
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TaskCompletionToggle({
+  task,
+  disabled,
+  onChange
+}: {
+  task: Task;
+  disabled?: boolean;
+  onChange: (status: Extract<TaskStatus, "not_started" | "completed">) => Promise<void>;
+}) {
+  const isEnded = task.status === "completed";
+
+  async function selectStatus(nextStatus: Extract<TaskStatus, "not_started" | "completed">) {
+    if (disabled) return;
+    if ((nextStatus === "completed") === isEnded) return;
+    await onChange(nextStatus);
+  }
+
+  return (
+    <div className="task-completion-toggle" aria-label="任务结束状态">
+      <button
+        type="button"
+        className={!isEnded ? "active" : undefined}
+        disabled={disabled}
+        aria-pressed={!isEnded}
+        onClick={() => void selectStatus("not_started")}
+      >
+        未开始
+      </button>
+      <button
+        type="button"
+        className={isEnded ? "active ended" : undefined}
+        disabled={disabled}
+        aria-pressed={isEnded}
+        onClick={() => void selectStatus("completed")}
+      >
+        已结束
+      </button>
+    </div>
+  );
+}
+
 function SharedFilesPanel({
   files,
   error,
   uploadFile,
+  searchQuery,
   isSaving,
   deletingFileId,
   onFileChange,
+  onSearchChange,
   onSubmit,
   onPreview,
   onDelete
@@ -1922,13 +3088,24 @@ function SharedFilesPanel({
   files: SharedFile[];
   error: string;
   uploadFile: File | null;
+  searchQuery: string;
   isSaving: boolean;
   deletingFileId: string | null;
   onFileChange: (file: File | null) => void;
+  onSearchChange: (value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onPreview: (file: SharedFile) => void;
   onDelete: (sharedFileId: string) => void;
 }) {
+  const normalizedSearch = searchQuery.trim().toLowerCase();
+  const visibleFiles = normalizedSearch
+    ? files.filter((file) =>
+        [file.fileName, file.uploaderName, file.note, file.fileType].some((value) =>
+          String(value ?? "").toLowerCase().includes(normalizedSearch)
+        )
+      )
+    : files;
+
   return (
     <aside className="communication-card shared-files-panel">
       <div className="communication-heading">
@@ -1939,9 +3116,19 @@ function SharedFilesPanel({
         <Files size={22} />
       </div>
 
+      <label className="panel-search-box">
+        <span>搜索文件</span>
+        <input
+          value={searchQuery}
+          onChange={(event) => onSearchChange(event.target.value)}
+          placeholder="输入文件关键字"
+          aria-label="搜索常用文件"
+        />
+      </label>
+
       <div className="chat-thread shared-file-thread">
-        {files.length ? (
-          files.map((file) => (
+        {visibleFiles.length ? (
+          visibleFiles.map((file) => (
             <article key={file.id} className={`shared-file-card ${file.uploaderRole}`}>
               <div className="shared-file-meta">
                 <div>
@@ -1971,18 +3158,20 @@ function SharedFilesPanel({
               </div>
             </article>
           ))
+        ) : files.length ? (
+          <p className="chat-empty">没有找到匹配的常用文件。</p>
         ) : (
           <p className="chat-empty">还没有常用文件，老师或助教可以把讲义、模板、打印材料先放进来。</p>
         )}
       </div>
 
-      <form className="shared-file-upload-form" onSubmit={onSubmit}>
+      <form className="shared-file-upload-form" onSubmit={onSubmit} title="常用文件框可以存讲义、模板和打印材料，方便老师和助教复用。">
         <label className="shared-file-picker">
           <input type="file" onChange={(event) => onFileChange(event.target.files?.[0] ?? null)} />
           <span>{uploadFile ? uploadFile.name : "添加文件"}</span>
         </label>
         {error && <p className="form-error">{error}</p>}
-        <button className="chat-send-button" type="submit" disabled={isSaving}>
+        <button className="chat-send-button" type="submit" disabled={isSaving} title="把当前文件存入常用文件框">
           {isSaving ? <Loader2 className="spin" size={16} /> : <UploadCloud size={16} />}
           存入常用文件框
         </button>
@@ -1995,15 +3184,28 @@ function PrintQueuePanel({
   jobs,
   deletingPrintJobId,
   pendingCount,
+  searchQuery,
+  onSearchChange,
   onStatusChange,
   onDelete
 }: {
   jobs: DashboardData["printJobs"];
   deletingPrintJobId: string | null;
   pendingCount: number;
+  searchQuery: string;
+  onSearchChange: (value: string) => void;
   onStatusChange: (jobId: string, status: "pending" | "printed" | "cancelled") => void;
   onDelete: (jobId: string) => void;
 }) {
+  const normalizedSearch = searchQuery.trim().toLowerCase();
+  const visibleJobs = normalizedSearch
+    ? jobs.filter((job) =>
+        [job.fileName, job.note, printStatusLabels[job.status] ?? job.status, String(job.copies)].some((value) =>
+          String(value ?? "").toLowerCase().includes(normalizedSearch)
+        )
+      )
+    : jobs;
+
   return (
     <aside id="print-queue-panel" className="communication-card print-queue-card">
       <div className="communication-heading">
@@ -2014,9 +3216,19 @@ function PrintQueuePanel({
         <div className="panel-count-badge">{pendingCount}</div>
       </div>
 
+      <label className="panel-search-box">
+        <span>搜索打印文件</span>
+        <input
+          value={searchQuery}
+          onChange={(event) => onSearchChange(event.target.value)}
+          placeholder="输入文件关键字"
+          aria-label="搜索打印队列文件"
+        />
+      </label>
+
       <div className="chat-thread print-queue-thread">
-        {jobs.length ? (
-          jobs.map((job) => (
+        {visibleJobs.length ? (
+          visibleJobs.map((job) => (
             <article key={job.id} className="shared-file-card print-job-card">
               <div className="shared-file-meta">
                 <div>
@@ -2035,7 +3247,11 @@ function PrintQueuePanel({
               </div>
               <div className="print-job-detail-row">
                 <b>{job.copies} 份</b>
-                <select value={job.status} onChange={(event) => onStatusChange(job.id, event.target.value as "pending" | "printed" | "cancelled")}>
+                <select
+                  value={job.status}
+                  title="这里可以更新打印状态"
+                  onChange={(event) => onStatusChange(job.id, event.target.value as "pending" | "printed" | "cancelled")}
+                >
                   {Object.entries(printStatusLabels).map(([value, label]) => (
                     <option key={value} value={value}>
                       {label}
@@ -2049,6 +3265,8 @@ function PrintQueuePanel({
               {job.note && <p>{job.note}</p>}
             </article>
           ))
+        ) : jobs.length ? (
+          <p className="chat-empty">没有找到匹配的打印文件。</p>
         ) : (
           <p className="chat-empty">当前没有待打印文件。</p>
         )}
@@ -2063,7 +3281,8 @@ function Metric({
   value,
   helper,
   onClick,
-  tone
+  tone,
+  highlight
 }: {
   icon: React.ReactNode;
   label: string;
@@ -2071,10 +3290,11 @@ function Metric({
   helper?: string;
   onClick?: () => void;
   tone?: "print";
+  highlight?: boolean;
 }) {
   const Element = onClick ? "button" : "article";
   return (
-    <Element className={tone ? `metric-card ${tone}` : "metric-card"} onClick={onClick}>
+    <Element className={`${tone ? `metric-card ${tone}` : "metric-card"}${highlight ? " guide-highlight" : ""}`} onClick={onClick}>
       <div>{icon}</div>
       <span>{label}</span>
       <strong>{value}</strong>
@@ -2088,13 +3308,21 @@ function TeacherFolderRow({
   studentCount,
   expanded,
   onToggle,
-  onRename
+  onRename,
+  dropActive,
+  onDragOver,
+  onDragLeave,
+  onDrop
 }: {
   teacherName: string;
   studentCount: number;
   expanded: boolean;
   onToggle: () => void;
-  onRename: (nextTeacherName: string) => void;
+  onRename?: (nextTeacherName: string) => void;
+  dropActive?: boolean;
+  onDragOver?: (event: DragEvent<HTMLDivElement>) => void;
+  onDragLeave?: (event: DragEvent<HTMLDivElement>) => void;
+  onDrop?: (event: DragEvent<HTMLDivElement>) => void;
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState(teacherName);
@@ -2104,15 +3332,28 @@ function TeacherFolderRow({
   }, [teacherName]);
 
   return (
-    <div className="teacher-folder-row">
+    <div
+      className={dropActive ? "teacher-folder-row archive-drop-target is-active" : "teacher-folder-row archive-drop-target"}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
       <button type="button" className="teacher-folder-button" onClick={onToggle} aria-expanded={expanded}>
         <strong>{teacherName}</strong>
         <small>{studentCount} 个学生</small>
       </button>
-      <button type="button" className="settings-button" onClick={() => setIsEditing((current) => !current)} aria-label={`修改 ${teacherName} 名字`}>
-        <Settings size={14} />
-      </button>
-      {isEditing && (
+      {onRename && (
+        <button
+          type="button"
+          className="settings-button"
+          title="点击修改老师名称"
+          onClick={() => setIsEditing((current) => !current)}
+          aria-label={`修改 ${teacherName} 名字`}
+        >
+          <Settings size={14} />
+        </button>
+      )}
+      {onRename && isEditing && (
         <div className="inline-edit-row">
           <input value={draft} onChange={(event) => setDraft(event.target.value)} aria-label={`修改 ${teacherName} 名字`} />
           <button
@@ -2138,13 +3379,29 @@ function GroupFolderRow({
   studentCount,
   expanded,
   onToggle,
-  onRename
+  onRename,
+  selected,
+  draggable,
+  dropActive,
+  onDragStart,
+  onDragEnd,
+  onDragOver,
+  onDragLeave,
+  onDrop
 }: {
   groupName: string;
   studentCount: number;
   expanded: boolean;
   onToggle: () => void;
-  onRename: (nextGroupName: string) => void;
+  onRename?: (nextGroupName: string) => void;
+  selected?: boolean;
+  draggable?: boolean;
+  dropActive?: boolean;
+  onDragStart?: (event: DragEvent<HTMLDivElement>) => void;
+  onDragEnd?: (event: DragEvent<HTMLDivElement>) => void;
+  onDragOver?: (event: DragEvent<HTMLDivElement>) => void;
+  onDragLeave?: (event: DragEvent<HTMLDivElement>) => void;
+  onDrop?: (event: DragEvent<HTMLDivElement>) => void;
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState(groupName);
@@ -2154,15 +3411,37 @@ function GroupFolderRow({
   }, [groupName]);
 
   return (
-    <div className="teacher-folder-row group-folder-row">
+    <div
+      className={`${dropActive ? "teacher-folder-row group-folder-row archive-drop-target is-active" : "teacher-folder-row group-folder-row archive-drop-target"}${draggable ? " has-drag-handle" : ""}${selected ? " selected-folder" : ""}`}
+      draggable={draggable}
+      title="拖动班级可移动到其他老师下面"
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      {draggable && (
+        <span className="drag-handle" aria-hidden="true">
+          <GripVertical size={15} />
+        </span>
+      )}
       <button type="button" className="teacher-folder-button" onClick={onToggle} aria-expanded={expanded}>
         <strong>{groupName}</strong>
         <small>{studentCount} 个学生</small>
       </button>
-      <button type="button" className="settings-button" onClick={() => setIsEditing((current) => !current)} aria-label={`修改 ${groupName} 班级名字`}>
-        <Settings size={14} />
-      </button>
-      {isEditing && (
+      {onRename && (
+        <button
+          type="button"
+          className="settings-button"
+          title="点击修改班级名称"
+          onClick={() => setIsEditing((current) => !current)}
+          aria-label={`修改 ${groupName} 班级名字`}
+        >
+          <Settings size={14} />
+        </button>
+      )}
+      {onRename && isEditing && (
         <div className="inline-edit-row">
           <input value={draft} onChange={(event) => setDraft(event.target.value)} aria-label={`修改 ${groupName} 班级名字`} />
           <button
@@ -2190,15 +3469,21 @@ function StudentCard({
   onSelect,
   onDelete,
   onUpdateGroup,
-  onRename
+  onRename,
+  draggable,
+  onDragStart,
+  onDragEnd
 }: {
   student: Student;
   active: boolean;
   groupOptions: string[];
   onSelect: () => void;
-  onDelete: () => void;
-  onUpdateGroup: (groupName: string) => void;
-  onRename: (nextStudentName: string) => void;
+  onDelete?: () => void;
+  onUpdateGroup?: (groupName: string) => void;
+  onRename?: (nextStudentName: string) => void;
+  draggable?: boolean;
+  onDragStart?: (event: DragEvent<HTMLDivElement>) => void;
+  onDragEnd?: (event: DragEvent<HTMLDivElement>) => void;
 }) {
   const [groupDraft, setGroupDraft] = useState(student.group || "");
   const [nameDraft, setNameDraft] = useState(student.name);
@@ -2213,64 +3498,138 @@ function StudentCard({
   const canSaveGroup = normalizedDraft.length > 0 && normalizedDraft !== student.group;
 
   return (
-    <div className={active ? "student-item-wrap active" : "student-item-wrap"}>
-      <div className="teacher-folder-row student-folder-row">
+    <div
+      className={active ? "student-item-wrap active" : "student-item-wrap"}
+      draggable={draggable}
+      title={draggable ? "拖动学生可移动到其他老师或班级下面" : undefined}
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+    >
+      <div className={draggable ? "teacher-folder-row student-folder-row has-drag-handle" : "teacher-folder-row student-folder-row"}>
+        {draggable && (
+          <span className="drag-handle" aria-hidden="true">
+            <GripVertical size={15} />
+          </span>
+        )}
         <button className="student-item" onClick={onSelect}>
           <strong>{student.name}</strong>
           <small>{student.group || "未分班"}</small>
         </button>
+        {(onRename || onUpdateGroup) && (
+          <button
+            className="settings-button student-settings-button"
+            type="button"
+            title="点击修改学生名称或班级"
+            onClick={() => setIsEditing((current) => !current)}
+            aria-label={`修改学生 ${student.name} 信息`}
+          >
+            <Settings size={14} />
+          </button>
+        )}
+      </div>
+      {isEditing && (
+        <>
+          {onRename && (
+            <div className="inline-edit-row student-name-edit">
+              <input value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} aria-label={`修改学生 ${student.name} 名字`} />
+              <button
+                type="button"
+                onClick={() => {
+                  const nextStudentName = nameDraft.trim();
+                  if (!nextStudentName || nextStudentName === student.name) return;
+                  onRename(nextStudentName);
+                  setIsEditing(false);
+                }}
+                disabled={!nameDraft.trim() || nameDraft.trim() === student.name}
+              >
+                保存姓名
+              </button>
+            </div>
+          )}
+          {onUpdateGroup && (
+            <div className="student-group-editor">
+              <input
+                value={groupDraft}
+                list={`student-groups-${student.id}`}
+                onChange={(event) => setGroupDraft(event.target.value)}
+                aria-label={`修改 ${student.name} 的班级`}
+              />
+              <datalist id={`student-groups-${student.id}`}>
+                {groupOptions.map((groupName) => (
+                  <option key={groupName} value={groupName} />
+                ))}
+              </datalist>
+              <button type="button" onClick={() => onUpdateGroup(normalizedDraft)} disabled={!canSaveGroup}>
+                保存班级
+              </button>
+            </div>
+          )}
+        </>
+      )}
+      {onDelete && (
+        <button className="delete-student-button" onClick={onDelete} aria-label={`删除学生 ${student.name}`}>
+          <X size={14} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function TaskTitleEditor({ task, onSave }: { task: Task; onSave: (task: Task) => void | Promise<void> }) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [draft, setDraft] = useState(task.title);
+  const [isSaving, setIsSaving] = useState(false);
+
+  useEffect(() => {
+    if (!isSaving) setDraft(task.title);
+  }, [isSaving, task.title]);
+
+  async function handleSave() {
+    const nextTitle = draft.trim();
+    if (!nextTitle || nextTitle === task.title) {
+      setIsEditing(false);
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      const savedTask = await updateTask(task.id, { title: nextTitle });
+      await onSave(savedTask);
+      setIsEditing(false);
+    } catch {
+      window.alert("任务名称保存失败，请确认后端服务正常。");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <div className="task-title-editor">
+      <div className="task-title-display">
+        <h3>{task.title}</h3>
         <button
-          className="settings-button student-settings-button"
           type="button"
+          className="settings-button task-settings-button"
+          title="点击修改任务名称"
           onClick={() => setIsEditing((current) => !current)}
-          aria-label={`修改学生 ${student.name} 信息`}
+          aria-label={`修改任务 ${task.title} 名称`}
         >
           <Settings size={14} />
         </button>
       </div>
       {isEditing && (
-        <>
-          <div className="inline-edit-row student-name-edit">
-            <input value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} aria-label={`修改学生 ${student.name} 名字`} />
-            <button
-              type="button"
-              onClick={() => {
-                const nextStudentName = nameDraft.trim();
-                if (!nextStudentName || nextStudentName === student.name) return;
-                onRename(nextStudentName);
-                setIsEditing(false);
-              }}
-              disabled={!nameDraft.trim() || nameDraft.trim() === student.name}
-            >
-              保存姓名
-            </button>
-          </div>
-          <div className="student-group-editor">
-            <input
-              value={groupDraft}
-              list={`student-groups-${student.id}`}
-              onChange={(event) => setGroupDraft(event.target.value)}
-              aria-label={`修改 ${student.name} 的班级`}
-            />
-            <datalist id={`student-groups-${student.id}`}>
-              {groupOptions.map((groupName) => (
-                <option key={groupName} value={groupName} />
-              ))}
-            </datalist>
-            <button type="button" onClick={() => onUpdateGroup(normalizedDraft)} disabled={!canSaveGroup}>
-              保存班级
-            </button>
-          </div>
-        </>
+        <div className="inline-edit-row task-title-edit">
+          <input value={draft} onChange={(event) => setDraft(event.target.value)} aria-label={`修改任务 ${task.title} 名称`} />
+          <button type="button" onClick={() => void handleSave()} disabled={isSaving || !draft.trim() || draft.trim() === task.title}>
+            {isSaving ? "保存中" : "保存名称"}
+          </button>
+        </div>
       )}
-      <button className="delete-student-button" onClick={onDelete} aria-label={`删除学生 ${student.name}`}>
-        <X size={14} />
-      </button>
     </div>
   );
 }
 
-function TeacherNoteEditor({ task, onSave }: { task: Task; onSave: () => Promise<void> }) {
+function TeacherNoteEditor({ task, onSave }: { task: Task; onSave: (task: Task) => void | Promise<void> }) {
   const [note, setNote] = useState(task.teacherComment ?? "");
   const [isSaving, setIsSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saved" | "error">("idle");
@@ -2294,7 +3653,7 @@ function TeacherNoteEditor({ task, onSave }: { task: Task; onSave: () => Promise
       const savedNote = savedTask.teacherComment ?? "";
       setNote(savedNote);
       lastSavedNoteRef.current = savedNote;
-      await onSave();
+      await onSave(savedTask);
       setSaveStatus("saved");
     } catch {
       setSaveStatus("error");
@@ -2349,12 +3708,14 @@ function FlowCard({ icon, title, text }: { icon: React.ReactNode; title: string;
 
 function TaskFileGallery({
   files,
+  section = "all",
   readOnly = false,
   deletingFileId,
   onDeleteFile,
   onPreview
 }: {
   files: TaskFile[];
+  section?: "all" | "assignment" | "correction";
   readOnly?: boolean;
   deletingFileId?: string | null;
   onDeleteFile?: (fileId: string) => void;
@@ -2365,24 +3726,28 @@ function TaskFileGallery({
 
   return (
     <div className="file-sections">
-      <FileSection
-        title="作业 / 附件"
-        tone="assignment"
-        files={assignmentFiles}
-        emptyText={readOnly ? "暂未上传作业" : "暂无作业文件"}
-        deletingFileId={deletingFileId}
-        onDelete={readOnly ? undefined : onDeleteFile}
-        onPreview={onPreview}
-      />
-      <FileSection
-        title="批改照片"
-        tone="correction"
-        files={correctionFiles}
-        emptyText={readOnly ? "暂未上传批改" : "暂无批改照片"}
-        deletingFileId={deletingFileId}
-        onDelete={readOnly ? undefined : onDeleteFile}
-        onPreview={onPreview}
-      />
+      {(section === "all" || section === "assignment") && (
+        <FileSection
+          title="作业/答案"
+          tone="assignment"
+          files={assignmentFiles}
+          emptyText={readOnly ? "暂未上传作业/答案" : "暂无作业/答案文件"}
+          deletingFileId={deletingFileId}
+          onDelete={readOnly ? undefined : onDeleteFile}
+          onPreview={onPreview}
+        />
+      )}
+      {(section === "all" || section === "correction") && (
+        <FileSection
+          title="批改照片"
+          tone="correction"
+          files={correctionFiles}
+          emptyText={readOnly ? "暂未上传批改" : "暂无批改照片"}
+          deletingFileId={deletingFileId}
+          onDelete={readOnly ? undefined : onDeleteFile}
+          onPreview={onPreview}
+        />
+      )}
     </div>
   );
 }
@@ -2417,7 +3782,7 @@ function FileSection({
           <>
             <button type="button" className="file-bundle-button" onClick={() => setExpanded((current) => !current)}>
               {previewFile?.fileType.startsWith("image/") && (
-                <img className="file-bundle-preview" src={resolveApiUrl(previewFile.url)} alt={previewFile.name} />
+                <img className="file-bundle-preview" src={resolveApiUrl(previewFile.thumbnailUrl ?? previewFile.url)} alt={previewFile.name} />
               )}
               <span>
                 <b>{title}</b>
@@ -2441,7 +3806,9 @@ function FileSection({
                       </button>
                     )}
                     <button type="button" className="file-preview-button" onClick={() => onPreview?.(file)}>
-                      {file.fileType.startsWith("image/") && <img className="file-preview" src={resolveApiUrl(file.url)} alt={file.name} />}
+                      {file.fileType.startsWith("image/") && (
+                        <img className="file-preview" src={resolveApiUrl(file.thumbnailUrl ?? file.url)} alt={file.name} />
+                      )}
                       <span>{file.name}</span>
                     </button>
                   </div>
@@ -2458,4 +3825,3 @@ function FileSection({
 }
 
 export default App;
-

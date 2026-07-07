@@ -1,9 +1,13 @@
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import cors from "cors";
 import express from "express";
 import multer from "multer";
+import PDFDocument from "pdfkit";
+import sharp from "sharp";
 import { z } from "zod";
 import { all, createId, databaseType, get, run } from "./db.js";
 
@@ -113,6 +117,7 @@ const allowedOrigins = (process.env.WEB_ORIGIN ?? "http://localhost:5173")
 
 app.use(
   cors({
+    exposedHeaders: ["Content-Disposition"],
     origin(origin, callback) {
       if (!origin || allowedOrigins.includes("*") || allowedOrigins.includes(origin)) {
         callback(null, true);
@@ -149,24 +154,46 @@ const updateTeacherSchema = z.object({
   name: z.string().trim().min(1).max(80)
 });
 
+const createTeacherSchema = z.object({
+  name: z.string().trim().min(1).max(80)
+});
+
 const renameTeacherGroupSchema = z.object({
   currentGroupName: z.string().trim().min(1),
   nextGroupName: z.string().trim().min(1)
 });
+
+const moveTeacherGroupSchema = z.object({
+  groupName: z.string().trim().min(1),
+  nextTeacherId: z.string().trim().min(1),
+  nextGroupName: z.string().trim().min(1).optional()
+});
+
+const dailyFeedbackQuerySchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+});
+
+const dueDateSchema = z.preprocess((value) => {
+  if (typeof value !== "string") return value;
+  const normalized = value.trim().replace(/\//g, "-").slice(0, 10);
+  return normalized || undefined;
+}, z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional());
 
 const createTaskSchema = z.object({
   studentId: z.string().min(1),
   title: z.string().min(2),
   type: z.enum(["reading", "listening", "writing", "speaking", "vocabulary", "grammar"]).optional(),
   priority: z.enum(["high", "medium", "low"]).optional(),
-  dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  dueDate: dueDateSchema,
   description: z.string().default(""),
   pinned: z.boolean().default(false)
 });
 
 const updateTaskSchema = z.object({
+  title: z.string().trim().min(1).optional(),
   status: z.enum(["not_started", "in_progress", "submitted", "reviewed", "completed"]).optional(),
   priority: z.enum(["high", "medium", "low"]).optional(),
+  dueDate: dueDateSchema,
   pinned: z.boolean().optional(),
   teacherComment: z.string().optional(),
   assistantNote: z.string().optional(),
@@ -208,6 +235,14 @@ const statusRank: Record<TaskStatus, number> = {
   submitted: 2,
   reviewed: 3,
   completed: 4
+};
+
+const taskStatusLabels: Record<TaskStatus, string> = {
+  not_started: "未开始",
+  in_progress: "进行中",
+  submitted: "已提交",
+  reviewed: "已批改",
+  completed: "已完成"
 };
 
 function now() {
@@ -257,6 +292,25 @@ async function ensureTeacherUser(name: string) {
   const id = createId("u-teacher");
   await run("INSERT INTO users (id, name, role, createdAt) VALUES (?, ?, 'teacher', ?)", [id, normalizedName, now()]);
   return { id, name: normalizedName };
+}
+
+async function markTasksWithCorrectionEvidenceCompleted() {
+  await run(
+    `UPDATE tasks
+     SET status = 'completed', updatedAt = ?
+     WHERE status <> 'completed'
+       AND (
+         COALESCE(TRIM(teacherComment), '') <> ''
+         OR EXISTS (
+           SELECT 1
+           FROM task_files
+           WHERE task_files.taskId = tasks.id
+             AND task_files.uploaderRole = 'assistant'
+             AND task_files.fileType LIKE 'image/%'
+         )
+       )`,
+    [now()]
+  );
 }
 
 function normalizeUploadedFileName(value: string | undefined | null, fallback = "file") {
@@ -333,6 +387,44 @@ function sanitizeExportFileName(value: string | undefined | null, fallback: stri
   return clean || fallback;
 }
 
+function getDateKey(value: string | null | undefined) {
+  return String(value ?? "").trim().replace(/\//g, "-").slice(0, 10);
+}
+
+function stripControlCharacters(value: string | null | undefined) {
+  return String(value ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").trim();
+}
+
+function pdfSafeText(value: string | null | undefined, fallback = "-") {
+  const clean = stripControlCharacters(value);
+  if (!clean) return fallback;
+  return clean.replace(/[^\x09\x0a\x0d\x20-\x7e\xa0-\xff]/g, "?");
+}
+
+async function readDashboardVersion() {
+  const [users, students, tasks, taskFiles, sharedFiles, printJobs, auditLogs] = await Promise.all([
+    get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(createdAt) AS marker FROM users"),
+    get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(updatedAt) AS marker FROM students"),
+    get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(updatedAt) AS marker FROM tasks"),
+    get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(createdAt) AS marker FROM task_files"),
+    get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(createdAt) AS marker FROM shared_files"),
+    get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(updatedAt) AS marker FROM print_jobs"),
+    get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(createdAt) AS marker FROM audit_logs")
+  ]);
+
+  return [
+    users,
+    students,
+    tasks,
+    taskFiles,
+    sharedFiles,
+    printJobs,
+    auditLogs
+  ]
+    .map((part) => `${part?.count ?? 0}:${part?.marker ?? ""}`)
+    .join("|");
+}
+
 async function imageDataUriFromTaskFile(file: TaskFileRow) {
   if (file.fileData) {
     return `data:${file.fileType};base64,${file.fileData}`;
@@ -371,10 +463,26 @@ async function readTaskFileBytes(file: TaskFileRow) {
 
   if (file.url.startsWith("/uploads/")) {
     const storedName = basename(file.url.replace("/uploads/", ""));
-    return readFile(join(uploadDirectory, storedName)).catch(() => null);
+    const localBytes = await readFile(join(uploadDirectory, storedName)).catch(() => null);
+    if (localBytes) return localBytes;
+  }
+
+  const storedFile = await get<Pick<TaskFileRow, "fileData">>("SELECT fileData FROM task_files WHERE id = ?", [file.id]).catch(() => null);
+  if (storedFile?.fileData) {
+    return Buffer.from(storedFile.fileData, "base64");
   }
 
   return null;
+}
+
+async function createPdfImageBytes(bytes: Buffer, fileType: string) {
+  if (!fileType.startsWith("image/")) return bytes;
+  return sharp(bytes)
+    .rotate()
+    .resize({ width: 1200, height: 1600, fit: "inside", withoutEnlargement: true })
+    .jpeg({ quality: 76, mozjpeg: true })
+    .toBuffer()
+    .catch(() => bytes);
 }
 
 async function readSharedFileBytes(file: SharedFileRow) {
@@ -399,6 +507,285 @@ async function readSharedFileBytes(file: SharedFileRow) {
   }
 
   return null;
+}
+
+function formatPdfDueDate(value: string) {
+  if (!value) return "未设置 DDL";
+  const normalizedValue = /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T20:00` : value;
+  const date = new Date(normalizedValue);
+  if (Number.isNaN(date.getTime())) return value.replace("T", " ");
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(date);
+}
+
+function resolvePdfFontPath() {
+  const bundledFullFontPath = fileURLToPath(new URL("../assets/QledaCjk.ttf", import.meta.url));
+  const bundledSubsetFontPath = fileURLToPath(new URL("../assets/NotoSansSC-QledaSubset.ttf", import.meta.url));
+  const candidates = [
+    process.env.PDF_FONT_PATH,
+    bundledFullFontPath,
+    bundledSubsetFontPath,
+    "C:\\Windows\\Fonts\\simhei.ttf",
+    "C:\\Windows\\Fonts\\msyh.ttc",
+    "C:\\Windows\\Fonts\\Deng.ttf"
+  ].filter((value): value is string => Boolean(value));
+
+  return candidates.find((fontPath) => /\.(otf|ttf|ttc)$/i.test(fontPath) && existsSync(fontPath));
+}
+
+function setPdfFont(doc: PDFKit.PDFDocument) {
+  const fontPath = resolvePdfFontPath();
+  if (fontPath) {
+    doc.registerFont("QledaCjk", fontPath);
+    doc.font("QledaCjk");
+    return;
+  }
+  doc.font("Helvetica");
+}
+
+function ensurePdfSpace(doc: PDFKit.PDFDocument, neededHeight: number) {
+  if (doc.y + neededHeight > doc.page.height - doc.page.margins.bottom) {
+    doc.addPage();
+    setPdfFont(doc);
+  }
+}
+
+function drawPdfSectionTitle(doc: PDFKit.PDFDocument, title: string) {
+  ensurePdfSpace(doc, 40);
+  doc.fillColor("#073f34").fontSize(16).text(title).moveDown(0.45);
+}
+
+function drawPdfMetaPill(doc: PDFKit.PDFDocument, text: string, x: number, y: number, width: number) {
+  doc.roundedRect(x, y, width, 22, 11).fill("#e4f2e8");
+  doc.fillColor("#073f34").fontSize(9).text(text, x + 9, y + 6, { width: width - 18, lineBreak: false });
+}
+
+function collectPdfBuffer(doc: PDFKit.PDFDocument) {
+  return new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    doc.on("data", (chunk: Buffer) => chunks.push(chunk));
+    doc.on("error", reject);
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.end();
+  });
+}
+
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper: (item: T) => Promise<R>) {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await mapper(items[currentIndex]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+async function preloadDailyFeedbackImages(files: TaskFileRow[]) {
+  const imageFiles = files.filter((file) => file.fileType.startsWith("image/"));
+  const loadedImages = await mapWithConcurrency(imageFiles, 3, async (file) => {
+    const bytes = await readTaskFileBytes(file);
+    if (!bytes) return null;
+    return { fileId: file.id, bytes: await createPdfImageBytes(bytes, file.fileType) };
+  });
+  const imageBytesByFileId = new Map<string, Buffer>();
+  loadedImages.forEach((item) => {
+    if (item) imageBytesByFileId.set(item.fileId, item.bytes);
+  });
+  return imageBytesByFileId;
+}
+
+const dailyFeedbackPdfCache = new Map<string, { expiresAt: number; pdf: Buffer }>();
+const dailyFeedbackPdfCacheTtlMs = 10 * 60 * 1000;
+const dailyFeedbackPdfCacheMaxEntries = 30;
+
+function createDailyFeedbackCacheKey(input: {
+  student: StudentRow;
+  tasks: TaskRow[];
+  taskFiles: TaskFileRow[];
+  date: string;
+}) {
+  const hash = createHash("sha1");
+  hash.update(input.student.id);
+  hash.update(input.student.name);
+  hash.update(input.student.group || "");
+  hash.update(input.student.currentLevel || "");
+  hash.update(input.student.updatedAt || "");
+  hash.update(input.date);
+  input.tasks.forEach((task) => {
+    hash.update(
+      [
+        task.id,
+        task.title,
+        task.type,
+        task.status,
+        task.score || "",
+        task.teacherComment || "",
+        task.assistantNote || "",
+        task.dueDate,
+        task.updatedAt
+      ].join("|")
+    );
+  });
+  input.taskFiles.forEach((file) => {
+    hash.update([file.id, file.taskId, file.name, file.fileType, file.fileSize || "", file.createdAt].join("|"));
+  });
+  return `${input.student.id}:${input.date}:${hash.digest("hex")}`;
+}
+
+function rememberDailyFeedbackPdf(cacheKey: string, pdf: Buffer) {
+  const nowMs = Date.now();
+  for (const [key, value] of dailyFeedbackPdfCache.entries()) {
+    if (value.expiresAt <= nowMs) dailyFeedbackPdfCache.delete(key);
+  }
+  dailyFeedbackPdfCache.set(cacheKey, { expiresAt: nowMs + dailyFeedbackPdfCacheTtlMs, pdf });
+  while (dailyFeedbackPdfCache.size > dailyFeedbackPdfCacheMaxEntries) {
+    const oldestKey = dailyFeedbackPdfCache.keys().next().value;
+    if (!oldestKey) break;
+    dailyFeedbackPdfCache.delete(oldestKey);
+  }
+}
+
+async function createDailyFeedbackPdf(input: {
+  student: StudentRow;
+  tasks: TaskRow[];
+  taskFiles: TaskFileRow[];
+  date: string;
+}) {
+  const title = `${input.student.name}-${input.date}-当日全部作业反馈`;
+  const doc = new PDFDocument({
+    size: "A4",
+    margin: 42,
+    bufferPages: true,
+    info: {
+      Title: title,
+      Author: "QULEDA Teaching Operations",
+      Subject: "Daily homework feedback"
+    }
+  });
+  const contentWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const taskFilesByTask = new Map<string, TaskFileRow[]>();
+  input.taskFiles.forEach((file) => {
+    const current = taskFilesByTask.get(file.taskId) ?? [];
+    current.push(file);
+    taskFilesByTask.set(file.taskId, current);
+  });
+  const imageBytesByFileId = await preloadDailyFeedbackImages(input.taskFiles);
+
+  setPdfFont(doc);
+  doc.rect(0, 0, doc.page.width, 150).fill("#f8f3df");
+  doc
+    .fillColor("#073f34")
+    .fontSize(30)
+    .text("QULEDA", 42, 38, { width: contentWidth * 0.45 })
+    .fontSize(10)
+    .fillColor("#0f765e")
+    .text("DAILY HOMEWORK FEEDBACK", 44, 75, { characterSpacing: 1.2 })
+    .fontSize(24)
+    .fillColor("#17211d")
+    .text("当日全部作业反馈", 42, 104, { width: contentWidth });
+
+  doc
+    .roundedRect(340, 34, 212, 84, 22)
+    .fill("#0a4f42")
+    .fillColor("#fffdf5")
+    .fontSize(15)
+    .text(input.student.name, 362, 56, { width: 168 })
+    .fontSize(10)
+    .fillColor("#d6e9de")
+    .text(`${input.date} | ${input.tasks.length} 个任务`, 362, 82, { width: 168 });
+
+  doc.y = 180;
+  drawPdfSectionTitle(doc, "学生概览");
+  const overviewY = doc.y;
+  drawPdfMetaPill(doc, `班级 ${input.student.group || "未分班"}`, 42, overviewY, 138);
+  drawPdfMetaPill(doc, `目标分 ${input.student.targetScore}`, 192, overviewY, 110);
+  drawPdfMetaPill(doc, `当前水平 ${input.student.currentLevel || "未填写"}`, 314, overviewY, 238);
+  doc.y = overviewY + 44;
+
+  for (const [index, task] of input.tasks.entries()) {
+    ensurePdfSpace(doc, 160);
+    const taskTop = doc.y;
+    doc
+      .roundedRect(42, taskTop, contentWidth, 48, 16)
+      .fill(index % 2 === 0 ? "#edf6eb" : "#fff8e8")
+      .fillColor("#073f34")
+      .fontSize(15)
+      .text(`${index + 1}. ${stripControlCharacters(task.title)}`, 58, taskTop + 12, { width: contentWidth - 116, lineGap: 2 })
+      .fillColor("#0f765e")
+      .fontSize(9)
+      .text(`DDL ${formatPdfDueDate(task.dueDate)}`, 428, taskTop + 16, { width: 108, align: "right" });
+
+    doc.y = taskTop + 64;
+    const pillY = doc.y;
+    drawPdfMetaPill(doc, taskStatusLabels[task.status as TaskStatus] ?? task.status, 58, pillY, 88);
+    drawPdfMetaPill(doc, task.score ? `分数 ${task.score}` : "暂无分数", 156, pillY, 104);
+    drawPdfMetaPill(doc, `类型 ${stripControlCharacters(task.type)}`, 270, pillY, 98);
+    doc.y = pillY + 38;
+
+    const description = stripControlCharacters(task.description);
+    if (description) {
+      doc.fillColor("#4f5d55").fontSize(10).text(description, 58, doc.y, { width: contentWidth - 32, lineGap: 3 }).moveDown(0.6);
+    }
+
+    const comment = stripControlCharacters(task.teacherComment || task.assistantNote) || "老师暂未留下文字评语，请以批改图片为准。";
+    const commentHeight = Math.max(64, doc.heightOfString(comment, { width: contentWidth - 60, lineGap: 4 }) + 36);
+    ensurePdfSpace(doc, commentHeight + 20);
+    const commentY = doc.y;
+    doc.roundedRect(54, commentY, contentWidth - 24, commentHeight, 18).fill("#fffaf0");
+    doc
+      .fillColor("#073f34")
+      .fontSize(11)
+      .text("老师评语", 72, commentY + 14)
+      .fillColor("#17211d")
+      .fontSize(10.5)
+      .text(comment, 72, commentY + 34, { width: contentWidth - 60, lineGap: 4 });
+    doc.y = commentY + commentHeight + 18;
+
+    const taskImages = (taskFilesByTask.get(task.id) ?? []).filter((file) => file.fileType.startsWith("image/"));
+    if (taskImages.length === 0) {
+      ensurePdfSpace(doc, 34);
+      doc.fillColor("#69736c").fontSize(9.5).text("暂无作业或批改图片。", 58, doc.y, { width: contentWidth - 32 }).moveDown(1);
+      continue;
+    }
+
+    for (const file of taskImages) {
+      const imageCardHeight = 712;
+      const imageFitHeight = 660;
+      const imageCardX = 42;
+      const imageCardWidth = contentWidth;
+      const imageInnerX = 50;
+      const imageInnerWidth = contentWidth - 16;
+      ensurePdfSpace(doc, imageCardHeight + 22);
+      const imageY = doc.y;
+      const imageLabel = file.uploaderRole === "assistant" ? "批改图片" : "作业图片";
+      doc.roundedRect(imageCardX, imageY, imageCardWidth, imageCardHeight, 18).fill("#ffffff");
+      doc.fillColor("#073f34").fontSize(10).text(`${imageLabel} · ${normalizeUploadedFileName(file.name, imageLabel)}`, imageInnerX, imageY + 14, {
+        width: imageInnerWidth
+      });
+      try {
+        const bytes = imageBytesByFileId.get(file.id) ?? (await readTaskFileBytes(file));
+        if (!bytes) throw new Error("No image bytes");
+        doc.image(bytes, imageInnerX, imageY + 38, {
+          fit: [imageInnerWidth, imageFitHeight],
+          align: "center",
+          valign: "center"
+        });
+      } catch {
+        doc.fillColor("#a1573b").fontSize(10).text("图片暂时无法载入。", imageInnerX, imageY + 48, { width: imageInnerWidth });
+      }
+      doc.y = imageY + imageCardHeight + 22;
+    }
+  }
+
+  return collectPdfBuffer(doc);
 }
 
 async function createParentFeedbackImage(input: {
@@ -462,9 +849,18 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "qleda-api", database: databaseType() });
 });
 
+app.get("/api/dashboard/version", async (_req, res, next) => {
+  try {
+    res.json({ version: await readDashboardVersion() });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/dashboard", async (_req, res, next) => {
   try {
-    const [users, students, tasks, taskFiles, parentExports, printJobs, auditLogs, chatMessages, sharedFiles] = await Promise.all([
+    await markTasksWithCorrectionEvidenceCompleted();
+    const [users, students, tasks, taskFiles, parentExports, printJobs, auditLogs, chatMessages, sharedFiles, version] = await Promise.all([
       all("SELECT * FROM users ORDER BY createdAt ASC"),
       all<StudentRow>(
         `SELECT students.id, students.name, students.grade, students.targetScore, students.currentLevel, students.\`group\` AS \`group\`,
@@ -483,7 +879,8 @@ app.get("/api/dashboard", async (_req, res, next) => {
       all<ChatMessageRow>("SELECT * FROM chat_messages ORDER BY createdAt DESC LIMIT 60"),
       all<SharedFileRow>(
         "SELECT id, uploaderId, uploaderRole, uploaderName, note, fileName, fileType, fileUrl, fileSize, createdAt FROM shared_files ORDER BY createdAt DESC LIMIT 40"
-      )
+      ),
+      readDashboardVersion()
     ]);
     const tasksWithCorrection = new Set(
       taskFiles
@@ -502,6 +899,7 @@ app.get("/api/dashboard", async (_req, res, next) => {
       auditLogs,
       chatMessages: chatMessages.reverse(),
       sharedFiles: sharedFiles.map(mapSharedFile),
+      version,
       summary: {
         studentCount: students.length,
         activeTasks: tasks.filter((task) => task.status !== "completed").length,
@@ -869,6 +1267,28 @@ app.delete("/api/student-groups/:groupName", async (req, res, next) => {
   }
 });
 
+app.post("/api/teachers", async (req, res, next) => {
+  try {
+    const payload = createTeacherSchema.parse(req.body);
+    const existing = await findTeacherUserByName(payload.name);
+    const teacher = existing ?? (await ensureTeacherUser(payload.name));
+
+    if (!existing) {
+      await writeAuditLog({
+        actor: teacher.id,
+        action: "teacher_created",
+        entityType: "teacher",
+        entityId: teacher.id,
+        detail: `Teacher ${teacher.name} created`
+      });
+    }
+
+    res.status(existing ? 200 : 201).json(teacher);
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.patch("/api/teachers/:teacherId", async (req, res, next) => {
   try {
     const teacherId = String(req.params.teacherId);
@@ -889,6 +1309,95 @@ app.patch("/api/teachers/:teacherId", async (req, res, next) => {
     });
 
     res.json({ id: teacherId, name: payload.name });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/teachers/:teacherId", async (req, res, next) => {
+  try {
+    const teacherId = String(req.params.teacherId);
+    const existing = await get<{ id: string; name: string }>("SELECT id, name FROM users WHERE id = ? AND role = 'teacher'", [teacherId]);
+    if (!existing) {
+      res.status(404).json({ message: "Teacher not found" });
+      return;
+    }
+
+    const students = await all<StudentRow>(
+      `SELECT students.id, students.name, students.grade, students.targetScore, students.currentLevel, students.\`group\` AS \`group\`,
+              students.teacherId, users.name AS teacherName, students.assistantId, students.createdAt, students.updatedAt
+       FROM students
+       LEFT JOIN users ON users.id = students.teacherId
+       WHERE students.teacherId = ?`,
+      [teacherId]
+    );
+
+    for (const student of students) {
+      await deleteStudentWithTasks(student.id);
+    }
+    await run("DELETE FROM users WHERE id = ? AND role = 'teacher'", [teacherId]);
+    await writeAuditLog({
+      actor: teacherId,
+      action: "teacher_deleted",
+      entityType: "teacher",
+      entityId: teacherId,
+      detail: `Deleted teacher ${existing.name} with ${students.length} students`
+    });
+
+    res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/teachers/:teacherId/groups/move", async (req, res, next) => {
+  try {
+    const teacherId = String(req.params.teacherId);
+    const payload = moveTeacherGroupSchema.parse(req.body);
+    const nextGroupName = payload.nextGroupName?.trim() || payload.groupName;
+
+    const [teacher, nextTeacher, students] = await Promise.all([
+      get<{ id: string; name: string }>("SELECT id, name FROM users WHERE id = ? AND role = 'teacher'", [teacherId]),
+      get<{ id: string; name: string }>("SELECT id, name FROM users WHERE id = ? AND role = 'teacher'", [payload.nextTeacherId]),
+      all<StudentRow>(
+        `SELECT students.id, students.name, students.grade, students.targetScore, students.currentLevel, students.\`group\` AS \`group\`,
+                students.teacherId, users.name AS teacherName, students.assistantId, students.createdAt, students.updatedAt
+         FROM students
+         LEFT JOIN users ON users.id = students.teacherId
+         WHERE students.teacherId = ? AND students.\`group\` = ?`,
+        [teacherId, payload.groupName]
+      )
+    ]);
+
+    if (!teacher) {
+      res.status(404).json({ message: "Teacher not found" });
+      return;
+    }
+    if (!nextTeacher) {
+      res.status(404).json({ message: "Target teacher not found" });
+      return;
+    }
+    if (!students.length) {
+      res.status(404).json({ message: "Teacher group not found" });
+      return;
+    }
+
+    await run("UPDATE students SET teacherId = ?, `group` = ?, updatedAt = ? WHERE teacherId = ? AND `group` = ?", [
+      payload.nextTeacherId,
+      nextGroupName,
+      now(),
+      teacherId,
+      payload.groupName
+    ]);
+    await writeAuditLog({
+      actor: teacherId,
+      action: "teacher_group_moved",
+      entityType: "student_group",
+      entityId: `${teacherId}:${payload.groupName}`,
+      detail: `Moved group ${payload.groupName} from ${teacher.name} to ${nextTeacher.name} as ${nextGroupName}`
+    });
+
+    res.json({ updatedCount: students.length, teacherId: payload.nextTeacherId, groupName: nextGroupName });
   } catch (error) {
     next(error);
   }
@@ -1019,15 +1528,21 @@ app.patch("/api/tasks/:taskId", async (req, res, next) => {
       return;
     }
 
+    const nextTeacherComment = payload.teacherComment ?? existing.teacherComment;
+    const hasTeacherComment = Boolean((nextTeacherComment ?? "").trim());
+    const nextStatus = payload.status ?? (hasTeacherComment ? "completed" : existing.status);
+
     await run(
       `UPDATE tasks
-       SET status = ?, priority = ?, pinned = ?, teacherComment = ?, assistantNote = ?, score = ?, updatedAt = ?
+       SET title = ?, status = ?, priority = ?, dueDate = ?, pinned = ?, teacherComment = ?, assistantNote = ?, score = ?, updatedAt = ?
        WHERE id = ?`,
       [
-        payload.status ?? existing.status,
+        payload.title ?? existing.title,
+        nextStatus,
         payload.priority ?? existing.priority,
+        payload.dueDate ?? existing.dueDate,
         payload.pinned === undefined ? existing.pinned : payload.pinned ? 1 : 0,
-        payload.teacherComment ?? existing.teacherComment,
+        nextTeacherComment,
         payload.assistantNote ?? existing.assistantNote,
         payload.score ?? existing.score,
         now(),
@@ -1071,6 +1586,125 @@ app.delete("/api/tasks/:taskId", async (req, res, next) => {
     await run("DELETE FROM parent_exports WHERE taskId = ?", [taskId]);
     await run("DELETE FROM tasks WHERE id = ?", [taskId]);
     res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/audit-logs/:logId/undo", async (req, res, next) => {
+  try {
+    const log = await get<AuditLogRow>("SELECT * FROM audit_logs WHERE id = ?", [String(req.params.logId)]);
+    if (!log) {
+      res.status(404).json({ message: "Audit log not found" });
+      return;
+    }
+
+    if (log.action === "teacher_created") {
+      const students = await all<StudentRow>("SELECT * FROM students WHERE teacherId = ?", [log.entityId]);
+      if (students.length) {
+        res.status(409).json({ message: "这个分组已经有学生，不能直接撤回创建。" });
+        return;
+      }
+      await run("DELETE FROM users WHERE id = ? AND role = 'teacher'", [log.entityId]);
+      await writeAuditLog({
+        actor: log.actor,
+        action: "undo_teacher_created",
+        entityType: "teacher",
+        entityId: log.entityId,
+        detail: `Undid teacher creation from log ${log.id}`
+      });
+      res.json({ message: "已撤回分组创建。" });
+      return;
+    }
+
+    if (log.action === "teacher_renamed") {
+      const match = /^Teacher name changed from (.+) to (.+)$/.exec(log.detail);
+      if (match) {
+        await run("UPDATE users SET name = ? WHERE id = ? AND role = 'teacher'", [match[1], log.entityId]);
+        await writeAuditLog({
+          actor: log.actor,
+          action: "undo_teacher_renamed",
+          entityType: "teacher",
+          entityId: log.entityId,
+          detail: `Undid teacher rename from log ${log.id}`
+        });
+        res.json({ message: "已恢复分组名称。" });
+        return;
+      }
+    }
+
+    if (log.action === "teacher_group_renamed") {
+      const match = /^Group (.+) renamed to (.+)$/.exec(log.detail);
+      const teacherId = log.entityId.split(":")[0];
+      if (match && teacherId) {
+        await run("UPDATE students SET `group` = ?, updatedAt = ? WHERE teacherId = ? AND `group` = ?", [
+          match[1],
+          now(),
+          teacherId,
+          match[2]
+        ]);
+        await writeAuditLog({
+          actor: log.actor,
+          action: "undo_teacher_group_renamed",
+          entityType: "student_group",
+          entityId: log.entityId,
+          detail: `Undid teacher group rename from log ${log.id}`
+        });
+        res.json({ message: "已恢复班级名称。" });
+        return;
+      }
+    }
+
+    if (log.action === "student_group_updated") {
+      const match = /^(.+) moved from (.+) to (.+)$/.exec(log.detail);
+      if (match) {
+        const previousGroup = match[2] === "No group" ? "" : match[2];
+        await run("UPDATE students SET `group` = ?, updatedAt = ? WHERE id = ?", [previousGroup, now(), log.entityId]);
+        await writeAuditLog({
+          actor: log.actor,
+          action: "undo_student_group_updated",
+          entityType: "student",
+          entityId: log.entityId,
+          detail: `Undid student group move from log ${log.id}`
+        });
+        res.json({ message: "已恢复学生原班级。" });
+        return;
+      }
+    }
+
+    if (log.action === "task_status_updated") {
+      const match = /^Task status changed from (.+) to (.+)$/.exec(log.detail);
+      if (match) {
+        await run("UPDATE tasks SET status = ?, updatedAt = ? WHERE id = ?", [match[1], now(), log.entityId]);
+        await writeAuditLog({
+          actor: log.actor,
+          action: "undo_task_status_updated",
+          entityType: "task",
+          entityId: log.entityId,
+          detail: `Undid task status update from log ${log.id}`
+        });
+        res.json({ message: "已恢复任务状态。" });
+        return;
+      }
+    }
+
+    if (log.action === "print_job_status_updated") {
+      const match = /^Print job .+ changed from (.+) to (.+)$/.exec(log.detail);
+      if (match) {
+        await run("UPDATE print_jobs SET status = ?, updatedAt = ? WHERE id = ?", [match[1], now(), log.entityId]);
+        await writeAuditLog({
+          actor: log.actor,
+          action: "undo_print_job_status_updated",
+          entityType: "print_job",
+          entityId: log.entityId,
+          detail: `Undid print job status update from log ${log.id}`
+        });
+        res.json({ message: "已恢复打印状态。" });
+        return;
+      }
+    }
+
+    res.status(409).json({ message: "这条记录缺少可恢复快照，不能安全撤回。" });
   } catch (error) {
     next(error);
   }
@@ -1121,6 +1755,9 @@ app.post("/api/tasks/:taskId/files", upload.single("file"), async (req, res, nex
       entityId: task.id,
       detail: `${String(req.body.uploaderRole ?? "teacher")} uploaded ${originalName}`
     });
+    if (String(req.body.uploaderRole ?? "teacher") === "assistant" && fileType.startsWith("image/")) {
+      await run("UPDATE tasks SET status = 'completed', updatedAt = ? WHERE id = ?", [now(), task.id]);
+    }
 
     const createdFile = await get<TaskFileRow>(
       "SELECT id, taskId, uploaderId, uploaderRole, name, fileType, url, fileSize, createdAt FROM task_files WHERE id = ?",
@@ -1189,8 +1826,16 @@ app.delete("/api/task-files/:fileId", async (req, res, next) => {
         [existing.taskId]
       );
       const task = await get<TaskRow>("SELECT * FROM tasks WHERE id = ?", [existing.taskId]);
-      if (task && task.status === "reviewed" && remainingCorrections.length === 0) {
-        await run("UPDATE tasks SET status = 'submitted', updatedAt = ? WHERE id = ?", [now(), existing.taskId]);
+      if (task && task.status === "completed" && remainingCorrections.length === 0 && !(task.teacherComment ?? "").trim()) {
+        const remainingAssignments = await all<TaskFileRow>(
+          "SELECT * FROM task_files WHERE taskId = ? AND NOT (uploaderRole = 'assistant' AND fileType LIKE 'image/%')",
+          [existing.taskId]
+        );
+        await run("UPDATE tasks SET status = ?, updatedAt = ? WHERE id = ?", [
+          remainingAssignments.length > 0 ? "submitted" : "not_started",
+          now(),
+          existing.taskId
+        ]);
       }
     }
     res.status(204).send();
@@ -1326,6 +1971,62 @@ app.post("/api/tasks/:taskId/parent-exports", async (req, res, next) => {
     );
 
     res.status(201).json(await get("SELECT * FROM parent_exports WHERE id = ?", [exported.id]));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/students/:studentId/daily-feedback.pdf", async (req, res, next) => {
+  try {
+    const studentId = String(req.params.studentId);
+    const { date } = dailyFeedbackQuerySchema.parse(req.query);
+    const student = await get<StudentRow>(
+      `SELECT students.id, students.name, students.grade, students.targetScore, students.currentLevel, students.\`group\` AS \`group\`,
+              students.teacherId, users.name AS teacherName, students.assistantId, students.createdAt, students.updatedAt
+       FROM students
+       LEFT JOIN users ON users.id = students.teacherId
+       WHERE students.id = ?`,
+      [studentId]
+    );
+
+    if (!student) {
+      res.status(404).json({ message: "Student not found" });
+      return;
+    }
+
+    const allTasks = await all<TaskRow>("SELECT * FROM tasks WHERE studentId = ? ORDER BY dueDate ASC, createdAt ASC", [studentId]);
+    const tasks = allTasks.filter((task) => getDateKey(task.dueDate) === date);
+    if (!tasks.length) {
+      res.status(404).json({ message: "No tasks found for this student and date" });
+      return;
+    }
+
+    const placeholders = tasks.map(() => "?").join(",");
+    const taskFiles = placeholders
+      ? await all<TaskFileRow>(
+          `SELECT id, taskId, uploaderId, uploaderRole, name, fileType, url, fileSize, createdAt
+           FROM task_files
+           WHERE taskId IN (${placeholders})
+           ORDER BY createdAt ASC`,
+          tasks.map((task) => task.id)
+        )
+      : [];
+    const cacheKey = createDailyFeedbackCacheKey({ student, tasks, taskFiles, date });
+    const cachedPdf = dailyFeedbackPdfCache.get(cacheKey);
+    const pdf =
+      cachedPdf && cachedPdf.expiresAt > Date.now()
+        ? cachedPdf.pdf
+        : await createDailyFeedbackPdf({ student, tasks, taskFiles, date });
+    if (!cachedPdf || cachedPdf.expiresAt <= Date.now()) {
+      rememberDailyFeedbackPdf(cacheKey, pdf);
+    }
+    const fileName = `${sanitizeExportFileName(student.name, "学生")}-${date}-当日全部作业反馈.pdf`;
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Length", String(pdf.length));
+    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`);
+    res.setHeader("Cache-Control", "no-store");
+    res.send(pdf);
   } catch (error) {
     next(error);
   }

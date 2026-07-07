@@ -2,6 +2,7 @@ import type {
   CreateStudentInput,
   CreateTaskInput,
   DashboardData,
+  DashboardVersion,
   ParentExport,
   PrintJob,
   SharedFile,
@@ -47,8 +48,19 @@ export function getDashboard() {
   return request<DashboardData>("/api/dashboard");
 }
 
+export function getDashboardVersion() {
+  return request<DashboardVersion>("/api/dashboard/version");
+}
+
 export function createStudent(input: CreateStudentInput) {
   return request<Student>("/api/students", {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export function createTeacher(input: { name: string }) {
+  return request<{ id: string; name: string }>("/api/teachers", {
     method: "POST",
     body: JSON.stringify(input)
   });
@@ -75,14 +87,34 @@ export function renameTeacherGroup(teacherId: string, input: { currentGroupName:
   });
 }
 
-export function createTask(input: CreateTaskInput) {
-  return request<Task>("/api/tasks", {
-    method: "POST",
+export function moveTeacherGroup(
+  teacherId: string,
+  input: { groupName: string; nextTeacherId: string; nextGroupName?: string }
+) {
+  return request<{ updatedCount: number; groupName: string; teacherId: string }>(`/api/teachers/${teacherId}/groups/move`, {
+    method: "PATCH",
     body: JSON.stringify(input)
   });
 }
 
-export function updateTask(taskId: string, input: { status?: TaskStatus; assistantNote?: string; teacherComment?: string }) {
+export function createTask(input: CreateTaskInput) {
+  const { dueDate: rawDueDate, ...rest } = input;
+  const normalizedDueDate = rawDueDate?.trim().replace(/\//g, "-").slice(0, 10) ?? "";
+  const payload = {
+    ...rest,
+    ...(normalizedDueDate ? { dueDate: normalizedDueDate } : {})
+  };
+
+  return request<Task>("/api/tasks", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function updateTask(
+  taskId: string,
+  input: { title?: string; status?: TaskStatus; assistantNote?: string; teacherComment?: string; dueDate?: string }
+) {
   return request<Task>(`/api/tasks/${taskId}`, {
     method: "PATCH",
     body: JSON.stringify(input)
@@ -249,6 +281,35 @@ export function createParentExport(taskId: string) {
     method: "POST",
     body: JSON.stringify({})
   });
+}
+
+function decodeDownloadFileName(disposition: string | null, fallback: string) {
+  if (!disposition) return fallback;
+  const encodedMatch = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (encodedMatch?.[1]) {
+    try {
+      return decodeURIComponent(encodedMatch[1]);
+    } catch {
+      return fallback;
+    }
+  }
+  const plainMatch = disposition.match(/filename="?([^";]+)"?/i);
+  return plainMatch?.[1] ?? fallback;
+}
+
+export async function downloadDailyFeedbackPdf(studentId: string, date: string, fallbackFileName?: string) {
+  const response = await fetch(`${apiBaseUrl}/api/students/${studentId}/daily-feedback.pdf?date=${encodeURIComponent(date)}`, {
+    cache: "no-store"
+  });
+
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
+
+  return {
+    blob: await response.blob(),
+    fileName: decodeDownloadFileName(response.headers.get("Content-Disposition"), fallbackFileName ?? `${date}-当日全部作业反馈.pdf`)
+  };
 }
 
 export function createSharedFile(input: {

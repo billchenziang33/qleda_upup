@@ -17,6 +17,13 @@ export interface Student {
 
 export type CreateStudentInput = Pick<Student, "name" | "group" | "teacherName">;
 
+export interface User {
+  id: string;
+  name: string;
+  role: Role;
+  createdAt: string;
+}
+
 export interface Task {
   id: string;
   studentId: string;
@@ -37,6 +44,7 @@ export type CreateTaskInput = {
   studentId: string;
   title: string;
   description: string;
+  dueDate: string;
   pinned: boolean;
 };
 
@@ -48,6 +56,8 @@ export interface TaskFile {
   name: string;
   fileType: string;
   url: string;
+  cloudFileId?: string;
+  thumbnailUrl?: string;
   createdAt: string;
 }
 
@@ -99,11 +109,15 @@ export interface SharedFile {
   fileName: string;
   fileType: string;
   fileUrl: string;
+  cloudFileId?: string;
+  thumbnailUrl?: string;
   fileSize?: number;
   createdAt: string;
 }
 
 export interface DashboardData {
+  version: string;
+  users: User[];
   students: Student[];
   tasks: Task[];
   taskFiles: TaskFile[];
@@ -118,4 +132,8 @@ export interface DashboardData {
     pendingReview: number;
     pendingPrintJobs: number;
   };
+}
+
+export interface DashboardVersion {
+  version: string;
 }
