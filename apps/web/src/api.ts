@@ -52,6 +52,10 @@ export function getDashboardVersion() {
   return request<DashboardVersion>("/api/dashboard/version");
 }
 
+export function getTaskFiles(taskId: string) {
+  return request<TaskFile[]>(`/api/tasks/${taskId}/files`);
+}
+
 export function createStudent(input: CreateStudentInput) {
   return request<Student>("/api/students", {
     method: "POST",

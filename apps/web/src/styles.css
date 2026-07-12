@@ -1204,6 +1204,11 @@ button.metric-card {
   font-weight: 850;
 }
 
+.teacher-folder-actions {
+  display: grid;
+  gap: 6px;
+}
+
 .settings-button {
   width: 28px;
   height: 28px;
@@ -1214,6 +1219,11 @@ button.metric-card {
   display: grid;
   place-items: center;
   cursor: pointer;
+}
+
+.teacher-delete-button {
+  color: #9f2f1d;
+  border-color: rgba(159, 47, 29, 0.18);
 }
 
 .inline-edit-row {

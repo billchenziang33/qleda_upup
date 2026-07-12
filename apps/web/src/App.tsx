@@ -37,6 +37,7 @@ import {
   deleteTaskFile,
   downloadDailyFeedbackPdf,
   getDashboard,
+  getTaskFiles,
   getDashboardVersion,
   moveTeacherGroup,
   resolveApiUrl,
@@ -69,10 +70,11 @@ const emptyStudentForm: CreateStudentInput = {
   teacherName: ""
 };
 
-const dashboardSyncIntervalMs = 60000;
+const dashboardSyncIntervalMs = 180000;
 const dashboardIdlePauseMs = 5 * 60 * 1000;
 const dashboardInitialRetryDelaysMs = [0, 1500, 3000, 6000, 10000];
 const teacherGuideStorageKey = "qleda-teacher-guide-seen-v2";
+const hiddenTeacherStorageKey = "qleda-hidden-teacher-ids-v1";
 const teacherOnboardingSteps = [
   {
     title: "先建立学生档案",
@@ -90,6 +92,20 @@ const teacherOnboardingSteps = [
 
 function wait(ms: number) {
   return new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+}
+
+function readHiddenTeacherIds() {
+  try {
+    const value = window.localStorage.getItem(hiddenTeacherStorageKey);
+    const parsed = value ? JSON.parse(value) : [];
+    return Array.isArray(parsed) ? new Set(parsed.filter((item) => typeof item === "string")) : new Set<string>();
+  } catch {
+    return new Set<string>();
+  }
+}
+
+function writeHiddenTeacherIds(teacherIds: Set<string>) {
+  window.localStorage.setItem(hiddenTeacherStorageKey, JSON.stringify(Array.from(teacherIds)));
 }
 
 const studentGroupCollator = new Intl.Collator("zh-CN", {
@@ -210,6 +226,17 @@ function getTaskDateKey(value: string) {
   if (Number.isNaN(date.getTime())) return "";
   const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60 * 1000);
   return localDate.toISOString().slice(0, 10);
+}
+
+function countTasksWithinDays(tasks: Task[], days: number) {
+  const cutoffDate = new Date();
+  cutoffDate.setDate(cutoffDate.getDate() - days);
+  cutoffDate.setHours(0, 0, 0, 0);
+  const cutoffKey = new Date(cutoffDate.getTime() - cutoffDate.getTimezoneOffset() * 60 * 1000).toISOString().slice(0, 10);
+  return tasks.filter((task) => {
+    const taskDateKey = getTaskDateKey(task.dueDate);
+    return taskDateKey ? taskDateKey >= cutoffKey : false;
+  }).length;
 }
 
 function getTodayDateInputValue() {
@@ -477,6 +504,7 @@ function App() {
   const [isDeletingStudent, setIsDeletingStudent] = useState(false);
   const [expandedTeachers, setExpandedTeachers] = useState<Set<string>>(() => new Set());
   const [expandedStudentGroups, setExpandedStudentGroups] = useState<Set<string>>(() => new Set());
+  const [hiddenTeacherIds, setHiddenTeacherIds] = useState<Set<string>>(() => readHiddenTeacherIds());
   const [dragTargetKey, setDragTargetKey] = useState<string | null>(null);
   const [deletingStudentGroup, setDeletingStudentGroup] = useState("");
   const [deletingFileId, setDeletingFileId] = useState<string | null>(null);
@@ -510,6 +538,39 @@ function App() {
   const lastActivityAtRef = useRef(Date.now());
   const lastDashboardVersionCheckAtRef = useRef(0);
   const toastTimerRef = useRef<number | null>(null);
+  const loadedTaskFileTaskIdsRef = useRef<Set<string>>(new Set());
+  const loadingTaskFileTaskIdsRef = useRef<Set<string>>(new Set());
+
+  function replaceTaskFilesForTask(taskId: string, files: TaskFile[]) {
+    const currentDashboard = dashboardRef.current;
+    if (!currentDashboard) return;
+
+    loadedTaskFileTaskIdsRef.current = new Set(loadedTaskFileTaskIdsRef.current).add(taskId);
+    const nextDashboard: DashboardData = {
+      ...currentDashboard,
+      taskFiles: [...currentDashboard.taskFiles.filter((file) => file.taskId !== taskId), ...files]
+    };
+    dashboardRef.current = nextDashboard;
+    setDashboard(nextDashboard);
+  }
+
+  async function ensureTaskFilesLoaded(taskId: string, options: { force?: boolean } = {}) {
+    if (!taskId) return;
+    if (!options.force && loadedTaskFileTaskIdsRef.current.has(taskId)) return;
+    if (loadingTaskFileTaskIdsRef.current.has(taskId)) return;
+
+    loadingTaskFileTaskIdsRef.current = new Set(loadingTaskFileTaskIdsRef.current).add(taskId);
+    try {
+      const files = await getTaskFiles(taskId);
+      replaceTaskFilesForTask(taskId, files);
+    } catch {
+      // Keep the current UI stable if a per-task file refresh fails.
+    } finally {
+      const nextLoading = new Set(loadingTaskFileTaskIdsRef.current);
+      nextLoading.delete(taskId);
+      loadingTaskFileTaskIdsRef.current = nextLoading;
+    }
+  }
 
   async function loadDashboard(options: { silent?: boolean; retryDelays?: number[]; force?: boolean } = {}) {
     if (isLoadingDashboardRef.current) {
@@ -550,6 +611,17 @@ function App() {
 
         try {
           const nextDashboard = await getDashboard();
+          const nextLoadedTaskFileTaskIds = new Set(nextDashboard.taskFilesLoadedTaskIds ?? []);
+          const cachedTaskFiles =
+            dashboardRef.current?.taskFiles.filter((file) => !nextLoadedTaskFileTaskIds.has(file.taskId)) ?? [];
+          loadedTaskFileTaskIdsRef.current = new Set([
+            ...loadedTaskFileTaskIdsRef.current,
+            ...nextLoadedTaskFileTaskIds
+          ]);
+          const mergedDashboard: DashboardData = {
+            ...nextDashboard,
+            taskFiles: [...nextDashboard.taskFiles, ...cachedTaskFiles]
+          };
           if (!options.silent && !dashboardRef.current) {
             setApiLoadProgress({
               percent: 100,
@@ -560,9 +632,9 @@ function App() {
               failed: false
             });
           }
-          dashboardRef.current = nextDashboard;
-          latestDashboardVersionRef.current = nextDashboard.version;
-          setDashboard(nextDashboard);
+          dashboardRef.current = mergedDashboard;
+          latestDashboardVersionRef.current = mergedDashboard.version;
+          setDashboard(mergedDashboard);
           setError("");
           return;
         } catch {
@@ -680,6 +752,35 @@ function App() {
   }, [portalMode]);
 
   useEffect(() => {
+    if (portalMode !== "teacher" || !dashboard) return;
+
+    const selectedGroupStudents = selectedTeacherGroup
+      ? dashboard.students.filter((student) => student.teacherId === selectedTeacherGroup.teacherId && student.group === selectedTeacherGroup.groupName)
+      : [];
+    const selectedGroupStudentIds = new Set(selectedGroupStudents.map((student) => student.id));
+    const tasksWithCorrection = new Set(dashboard.tasksWithCorrection ?? []);
+    const selectedStudentTasks = isPendingReviewListOpen
+      ? dashboard.tasks.filter((task) => task.status !== "completed" && !tasksWithCorrection.has(task.id))
+      : selectedTeacherGroup
+      ? dashboard.tasks.filter((task) => selectedGroupStudentIds.has(task.studentId))
+      : selectedStudentId === "all"
+        ? dashboard.tasks
+        : dashboard.tasks.filter((task) => task.studentId === selectedStudentId);
+    const orderedSelectedStudentTasks =
+      selectedStudentId === "all" && !selectedTeacherGroup && !isPendingReviewListOpen ? selectedStudentTasks : sortTasksByLatest(selectedStudentTasks);
+    const isDefaultTaskOverview = selectedStudentId === "all" && !selectedTeacherGroup && !isPendingReviewListOpen;
+    const taskPreviewLimit = isDefaultTaskOverview ? 5 : 3;
+    const visibleTasks =
+      isPendingReviewListOpen || isTaskListExpanded
+        ? orderedSelectedStudentTasks
+        : orderedSelectedStudentTasks.slice(0, taskPreviewLimit);
+
+    visibleTasks.forEach((task) => {
+      void ensureTaskFilesLoaded(task.id);
+    });
+  }, [dashboard, ensureTaskFilesLoaded, isPendingReviewListOpen, isTaskListExpanded, portalMode, selectedStudentId, selectedTeacherGroup]);
+
+  useEffect(() => {
     return () => {
       if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
     };
@@ -717,10 +818,12 @@ function App() {
   async function handleExport(taskId: string) {
     setBusyTaskId(taskId);
     try {
-      const task = dashboard?.tasks.find((item) => item.id === taskId);
+      await ensureTaskFilesLoaded(taskId, { force: true });
+      const currentDashboard = dashboardRef.current;
+      const task = currentDashboard?.tasks.find((item) => item.id === taskId);
       if (!task) throw new Error("Task not found");
-      const student = dashboard?.students.find((item) => item.id === task.studentId);
-      const correctionImages = dashboard?.taskFiles
+      const student = currentDashboard?.students.find((item) => item.id === task.studentId);
+      const correctionImages = currentDashboard?.taskFiles
         .filter((file) => file.taskId === taskId && file.fileType.startsWith("image/"))
         .slice(-9);
       if (!correctionImages?.length) throw new Error("No correction image");
@@ -758,17 +861,13 @@ function App() {
     if (!currentDashboard) return;
 
     const nextTasks = currentDashboard.tasks.map((task) => (task.id === updatedTask.id ? updatedTask : task));
-    const correctedTaskIds = new Set(
-      currentDashboard.taskFiles
-        .filter((file) => file.uploaderRole === "assistant" && file.fileType.startsWith("image/"))
-        .map((file) => file.taskId)
-    );
+    const correctedTaskIds = new Set(currentDashboard.tasksWithCorrection ?? []);
     const nextDashboard: DashboardData = {
       ...currentDashboard,
       tasks: nextTasks,
       summary: {
         ...currentDashboard.summary,
-        activeTasks: nextTasks.filter((task) => task.status !== "completed").length,
+        activeTasks: countTasksWithinDays(nextTasks, 21),
         pendingReview: nextTasks.filter((task) => task.status !== "completed" && !correctedTaskIds.has(task.id)).length
       }
     };
@@ -883,9 +982,10 @@ function App() {
         }
       );
       await updateTask(assignmentTaskId, {
-        status: "submitted"
+        status: "completed"
       });
       await loadDashboard();
+      await ensureTaskFilesLoaded(assignmentTaskId, { force: true });
       if (isPendingReviewListOpen) {
         setLocatedTaskId(null);
       } else if (task) {
@@ -926,9 +1026,9 @@ function App() {
             uploaderId: "u-assistant-chen",
             uploaderRole: "assistant",
             compressImage: {
-              maxSide: 2200,
-              quality: 0.88,
-              minBytes: 220 * 1024
+              maxSide: 1600,
+              quality: 0.76,
+              minBytes: 160 * 1024
             }
           });
         }
@@ -938,6 +1038,7 @@ function App() {
         teacherComment: correctionNote
       });
       await loadDashboard();
+      await ensureTaskFilesLoaded(correctionTaskId, { force: true });
       if (isPendingReviewListOpen) {
         setLocatedTaskId(null);
       } else if (task) {
@@ -1201,8 +1302,18 @@ function App() {
     setDeletingFileId(fileId);
 
     try {
+      const taskId = dashboardRef.current?.taskFiles.find((file) => file.id === fileId)?.taskId;
       await deleteTaskFile(fileId);
+      if (taskId) {
+        replaceTaskFilesForTask(
+          taskId,
+          (dashboardRef.current?.taskFiles ?? []).filter((file) => file.taskId === taskId && file.id !== fileId)
+        );
+      }
       await loadDashboard();
+      if (taskId) {
+        await ensureTaskFilesLoaded(taskId, { force: true });
+      }
     } catch {
       window.alert("删除批改照片失败，请确认后端服务正常。");
     } finally {
@@ -1309,6 +1420,33 @@ function App() {
       behavior: "smooth",
       block: "start"
     });
+  }
+
+  function handleHideTeacher(teacherId: string, teacherName: string) {
+    const teacherStudents = dashboardRef.current?.students.filter((student) => student.teacherId === teacherId) ?? [];
+    if (!window.confirm(`确认从当前前端隐藏「${teacherName}」老师以及其下 ${teacherStudents.length} 个学生吗？数据库数据会保留。`)) return;
+
+    const nextHiddenTeacherIds = new Set(hiddenTeacherIds).add(teacherId);
+    setHiddenTeacherIds(nextHiddenTeacherIds);
+    writeHiddenTeacherIds(nextHiddenTeacherIds);
+    setExpandedTeachers((current) => {
+      const next = new Set(current);
+      next.delete(teacherId);
+      return next;
+    });
+    setExpandedStudentGroups((current) => {
+      const next = new Set(current);
+      Array.from(next).forEach((key) => {
+        if (key.startsWith(`${teacherId}::`)) next.delete(key);
+      });
+      return next;
+    });
+
+    const selectedStudent = dashboardRef.current?.students.find((student) => student.id === selectedStudentId);
+    if (selectedStudent?.teacherId === teacherId || selectedTeacherGroup?.teacherId === teacherId) {
+      clearSelectedStudent();
+    }
+    showToast(`${teacherName} 已从当前前端隐藏，后端数据仍然保留。`);
   }
 
   function openTeacherDailyFeedbackForm() {
@@ -1479,6 +1617,7 @@ function App() {
           dashboard={dashboard}
           selectedStudentId={studentPortalId}
           onStudentChange={setStudentPortalId}
+          onEnsureTaskFilesLoaded={ensureTaskFilesLoaded}
           onPreview={setPreviewFile}
           onBack={() => setPortalMode("landing")}
         />
@@ -1491,11 +1630,7 @@ function App() {
     ? dashboard.students.filter((student) => student.teacherId === selectedTeacherGroup.teacherId && student.group === selectedTeacherGroup.groupName)
     : [];
   const selectedGroupStudentIds = new Set(selectedGroupStudents.map((student) => student.id));
-  const tasksWithCorrection = new Set(
-    dashboard.taskFiles
-      .filter((file) => file.uploaderRole === "assistant" && file.fileType.startsWith("image/"))
-      .map((file) => file.taskId)
-  );
+  const tasksWithCorrection = new Set(dashboard.tasksWithCorrection ?? []);
   const selectedStudentTasks = isPendingReviewListOpen
     ? dashboard.tasks.filter((task) => task.status !== "completed" && !tasksWithCorrection.has(task.id))
     : selectedTeacherGroup
@@ -1513,7 +1648,9 @@ function App() {
       : orderedSelectedStudentTasks.slice(0, taskPreviewLimit);
   const selectedTeacherStudent = selectedStudentId === "all" ? undefined : dashboard.students.find((student) => student.id === selectedStudentId);
   const teacherFeedbackDates = Array.from(new Set(selectedStudentTasks.map((task) => getTaskDateKey(task.dueDate)).filter(Boolean))).sort().reverse();
-  const teacherGroups = groupStudentsByTeacher(dashboard.students, dashboard.users);
+  const teacherGroups = groupStudentsByTeacher(dashboard.students, dashboard.users).filter(
+    (teacher) => !hiddenTeacherIds.has(teacher.teacherId)
+  );
   const normalizedStudentSearch = studentSearchQuery.trim().toLowerCase();
   const filteredTeacherGroups = normalizedStudentSearch
     ? teacherGroups
@@ -1575,9 +1712,9 @@ function App() {
             <Metric icon={<GraduationCap />} label="学生数量" value={dashboard.summary.studentCount} />
             <Metric
               icon={<ClipboardList />}
-              label="进行中任务"
+              label="21天内总任务"
               value={dashboard.summary.activeTasks}
-              helper="查看全部学生任务"
+              helper="查看21天内全部学生任务"
               onClick={() => {
                 setSelectedStudentId("all");
                 setSelectedTeacherGroup(null);
@@ -1693,6 +1830,7 @@ function App() {
                       toggleTeacher(teacherId);
                     }}
                     onRename={(nextTeacherName) => void handleRenameTeacher(teacherId, nextTeacherName)}
+                    onDelete={() => handleHideTeacher(teacherId, teacherName)}
                     dropActive={dragTargetKey === `teacher:${teacherId}`}
                     onDragOver={(event) => handleStudentArchiveDragOver(event, `teacher:${teacherId}`)}
                     onDragLeave={(event) => handleStudentArchiveDragLeave(event, `teacher:${teacherId}`)}
@@ -2551,12 +2689,14 @@ function StudentPortal({
   dashboard,
   selectedStudentId,
   onStudentChange,
+  onEnsureTaskFilesLoaded,
   onPreview,
   onBack
 }: {
   dashboard: DashboardData;
   selectedStudentId: string;
   onStudentChange: (studentId: string) => void;
+  onEnsureTaskFilesLoaded: (taskId: string, options?: { force?: boolean }) => Promise<void>;
   onPreview: (file: TaskFile) => void;
   onBack: () => void;
 }) {
@@ -2594,6 +2734,12 @@ function StudentPortal({
   useEffect(() => {
     setIsTaskListExpanded(false);
   }, [selectedStudentId]);
+
+  useEffect(() => {
+    visibleSelectedTasks.forEach((task) => {
+      void onEnsureTaskFilesLoaded(task.id);
+    });
+  }, [onEnsureTaskFilesLoaded, visibleSelectedTasks]);
 
   function startStudentArchiveDrag(
     event: DragEvent<HTMLElement>,
@@ -3309,6 +3455,7 @@ function TeacherFolderRow({
   expanded,
   onToggle,
   onRename,
+  onDelete,
   dropActive,
   onDragOver,
   onDragLeave,
@@ -3319,6 +3466,7 @@ function TeacherFolderRow({
   expanded: boolean;
   onToggle: () => void;
   onRename?: (nextTeacherName: string) => void;
+  onDelete?: () => void;
   dropActive?: boolean;
   onDragOver?: (event: DragEvent<HTMLDivElement>) => void;
   onDragLeave?: (event: DragEvent<HTMLDivElement>) => void;
@@ -3342,16 +3490,31 @@ function TeacherFolderRow({
         <strong>{teacherName}</strong>
         <small>{studentCount} 个学生</small>
       </button>
-      {onRename && (
-        <button
-          type="button"
-          className="settings-button"
-          title="点击修改老师名称"
-          onClick={() => setIsEditing((current) => !current)}
-          aria-label={`修改 ${teacherName} 名字`}
-        >
-          <Settings size={14} />
-        </button>
+      {(onRename || onDelete) && (
+        <div className="teacher-folder-actions">
+          {onRename && (
+            <button
+              type="button"
+              className="settings-button"
+              title="点击修改老师名称"
+              onClick={() => setIsEditing((current) => !current)}
+              aria-label={`修改 ${teacherName} 名字`}
+            >
+              <Settings size={14} />
+            </button>
+          )}
+          {onDelete && (
+            <button
+              type="button"
+              className="settings-button teacher-delete-button"
+              title="从当前前端隐藏老师"
+              onClick={onDelete}
+              aria-label={`隐藏 ${teacherName} 老师`}
+            >
+              <Trash2 size={14} />
+            </button>
+          )}
+        </div>
       )}
       {onRename && isEditing && (
         <div className="inline-edit-row">
@@ -3633,28 +3796,49 @@ function TeacherNoteEditor({ task, onSave }: { task: Task; onSave: (task: Task) 
   const [note, setNote] = useState(task.teacherComment ?? "");
   const [isSaving, setIsSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saved" | "error">("idle");
-  const initialSyncDoneRef = useRef(false);
   const lastSavedNoteRef = useRef(task.teacherComment ?? "");
+  const latestNoteRef = useRef(task.teacherComment ?? "");
+  const syncedTaskIdRef = useRef(task.id);
 
   useEffect(() => {
-    if (!isSaving) {
-      setNote(task.teacherComment ?? "");
-      lastSavedNoteRef.current = task.teacherComment ?? "";
+    latestNoteRef.current = note;
+  }, [note]);
+
+  useEffect(() => {
+    const nextSavedNote = task.teacherComment ?? "";
+    const taskChanged = syncedTaskIdRef.current !== task.id;
+    const hasUnsavedChanges = latestNoteRef.current !== lastSavedNoteRef.current;
+
+    if (taskChanged) {
+      syncedTaskIdRef.current = task.id;
+      lastSavedNoteRef.current = nextSavedNote;
+      latestNoteRef.current = nextSavedNote;
+      setNote(nextSavedNote);
+      setSaveStatus("idle");
+      return;
+    }
+
+    if (!isSaving && !hasUnsavedChanges && nextSavedNote !== lastSavedNoteRef.current) {
+      lastSavedNoteRef.current = nextSavedNote;
+      latestNoteRef.current = nextSavedNote;
+      setNote(nextSavedNote);
       setSaveStatus("idle");
     }
-    initialSyncDoneRef.current = true;
   }, [isSaving, task.id, task.teacherComment]);
 
   async function handleSave(nextNote: string) {
+    if (nextNote === lastSavedNoteRef.current) return;
+
     setIsSaving(true);
     setSaveStatus("idle");
     try {
       const savedTask = await updateTask(task.id, { teacherComment: nextNote });
       const savedNote = savedTask.teacherComment ?? "";
-      setNote(savedNote);
       lastSavedNoteRef.current = savedNote;
       await onSave(savedTask);
-      setSaveStatus("saved");
+      if (latestNoteRef.current === savedNote) {
+        setSaveStatus("saved");
+      }
     } catch {
       setSaveStatus("error");
       window.alert("老师备注保存失败，请确认后端服务正常。");
@@ -3664,15 +3848,15 @@ function TeacherNoteEditor({ task, onSave }: { task: Task; onSave: (task: Task) 
   }
 
   useEffect(() => {
-    if (!initialSyncDoneRef.current) return;
     if (note === lastSavedNoteRef.current) return;
+    if (isSaving) return;
 
     const timer = window.setTimeout(() => {
       void handleSave(note);
-    }, 700);
+    }, 5000);
 
     return () => window.clearTimeout(timer);
-  }, [note]);
+  }, [isSaving, note]);
 
   return (
     <div className="teacher-note-editor">

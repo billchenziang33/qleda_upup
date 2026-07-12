@@ -121,6 +121,8 @@ export interface DashboardData {
   students: Student[];
   tasks: Task[];
   taskFiles: TaskFile[];
+  taskFilesLoadedTaskIds?: string[];
+  tasksWithCorrection?: string[];
   parentExports: ParentExport[];
   printJobs: PrintJob[];
   auditLogs: AuditLog[];

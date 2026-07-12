@@ -159,6 +159,12 @@ function sqliteSchema(db: Database) {
       createdAt TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS dashboard_versions (
+      id TEXT PRIMARY KEY,
+      marker TEXT NOT NULL,
+      updatedAt TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_tasks_student ON tasks(studentId);
     CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
     CREATE INDEX IF NOT EXISTS idx_print_jobs_status ON print_jobs(status);
@@ -288,6 +294,11 @@ const mysqlStatements = [
     fileSize BIGINT,
     createdAt VARCHAR(40) NOT NULL,
     INDEX idx_shared_files_created (createdAt)
+  )`,
+  `CREATE TABLE IF NOT EXISTS dashboard_versions (
+    id VARCHAR(80) PRIMARY KEY,
+    marker VARCHAR(80) NOT NULL,
+    updatedAt VARCHAR(40) NOT NULL
   )`
 ];
 

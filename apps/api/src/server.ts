@@ -109,6 +109,10 @@ const port = Number(process.env.PORT ?? 4000);
 const host = process.env.HOST ?? "0.0.0.0";
 const uploadDirectory = fileURLToPath(new URL("../data/uploads", import.meta.url));
 const exportDirectory = fileURLToPath(new URL("../data/exports", import.meta.url));
+const oldCompletedTaskRetentionDays = 21;
+const oldCompletedTaskCleanupIntervalMs = 12 * 60 * 60 * 1000;
+let oldCompletedTaskCleanupAt = 0;
+let oldCompletedTaskCleanupPromise: Promise<void> | null = null;
 
 const allowedOrigins = (process.env.WEB_ORIGIN ?? "http://localhost:5173")
   .split(",")
@@ -249,6 +253,36 @@ function now() {
   return new Date().toISOString();
 }
 
+function subtractDays(days: number) {
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+}
+
+function getOldCompletedTaskCutoffDate() {
+  return subtractDays(oldCompletedTaskRetentionDays).toISOString().slice(0, 10);
+}
+
+function countTasksWithinDays(tasks: Pick<TaskRow, "dueDate">[], days: number) {
+  const cutoffDate = subtractDays(days);
+  cutoffDate.setHours(0, 0, 0, 0);
+  const cutoffKey = cutoffDate.toISOString().slice(0, 10);
+  return tasks.filter((task) => task.dueDate && task.dueDate.slice(0, 10) >= cutoffKey).length;
+}
+
+function getDashboardRelevantTaskIds(tasks: TaskRow[], days: number) {
+  const cutoffDate = subtractDays(days);
+  cutoffDate.setHours(0, 0, 0, 0);
+  const cutoffKey = cutoffDate.toISOString().slice(0, 10);
+  return tasks
+    .filter((task) => task.status !== "completed" || (task.dueDate && task.dueDate.slice(0, 10) >= cutoffKey))
+    .map((task) => task.id);
+}
+
+async function deleteStoredAppFile(fileUrl: string, baseRoute: "/uploads/" | "/exports/", directory: string) {
+  if (!fileUrl.startsWith(baseRoute)) return;
+  const storedName = basename(fileUrl.replace(baseRoute, ""));
+  await unlink(join(directory, storedName)).catch(() => undefined);
+}
+
 async function writeAuditLog(input: {
   actor?: string;
   action: string;
@@ -256,6 +290,7 @@ async function writeAuditLog(input: {
   entityId: string;
   detail: string;
 }) {
+  const timestamp = now();
   await run(
     "INSERT INTO audit_logs (id, actor, action, entityType, entityId, detail, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)",
     [
@@ -265,9 +300,10 @@ async function writeAuditLog(input: {
       input.entityType,
       input.entityId,
       input.detail,
-      now()
+      timestamp
     ]
   );
+  await touchDashboardVersion(timestamp);
 }
 
 function mapTask(task: TaskRow) {
@@ -294,7 +330,34 @@ async function ensureTeacherUser(name: string) {
   return { id, name: normalizedName };
 }
 
-async function markTasksWithCorrectionEvidenceCompleted() {
+async function touchDashboardVersion(timestamp = now()) {
+  const marker = `${timestamp}:${createId("dv")}`;
+  if (databaseType() === "mysql") {
+    await run(
+      `INSERT INTO dashboard_versions (id, marker, updatedAt)
+       VALUES ('main', ?, ?)
+       ON DUPLICATE KEY UPDATE marker = VALUES(marker), updatedAt = VALUES(updatedAt)`,
+      [marker, timestamp]
+    );
+    return;
+  }
+
+  await run(
+    `INSERT INTO dashboard_versions (id, marker, updatedAt)
+     VALUES ('main', ?, ?)
+     ON CONFLICT(id) DO UPDATE SET marker = excluded.marker, updatedAt = excluded.updatedAt`,
+    [marker, timestamp]
+  );
+}
+
+async function readDashboardVersionMarker() {
+  const row = await get<{ marker: string | null; updatedAt: string | null }>(
+    "SELECT marker, updatedAt FROM dashboard_versions WHERE id = 'main'"
+  );
+  return row?.marker ?? row?.updatedAt ?? "";
+}
+
+async function markTasksWithTaskEvidenceCompleted() {
   await run(
     `UPDATE tasks
      SET status = 'completed', updatedAt = ?
@@ -305,12 +368,73 @@ async function markTasksWithCorrectionEvidenceCompleted() {
            SELECT 1
            FROM task_files
            WHERE task_files.taskId = tasks.id
+             AND task_files.uploaderRole = 'student'
+         )
+         OR EXISTS (
+           SELECT 1
+           FROM task_files
+           WHERE task_files.taskId = tasks.id
              AND task_files.uploaderRole = 'assistant'
              AND task_files.fileType LIKE 'image/%'
          )
        )`,
     [now()]
   );
+}
+
+async function cleanupOldCompletedTasks() {
+  const startedAt = Date.now();
+  if (oldCompletedTaskCleanupPromise) return oldCompletedTaskCleanupPromise;
+  if (startedAt - oldCompletedTaskCleanupAt < oldCompletedTaskCleanupIntervalMs) return;
+
+  oldCompletedTaskCleanupPromise = (async () => {
+    const cutoffDate = getOldCompletedTaskCutoffDate();
+    const expiredTasks = await all<Pick<TaskRow, "id">>(
+      "SELECT id FROM tasks WHERE status = 'completed' AND dueDate <> '' AND dueDate < ?",
+      [cutoffDate]
+    );
+    if (!expiredTasks.length) return;
+
+    const taskIds = expiredTasks.map((task) => task.id);
+    const placeholders = taskIds.map(() => "?").join(",");
+    const [taskFiles, parentExports] = await Promise.all([
+      all<Pick<TaskFileRow, "id" | "taskId" | "url">>(
+        `SELECT id, taskId, url FROM task_files WHERE taskId IN (${placeholders})`,
+        taskIds
+      ),
+      all<{ id: string; taskId: string; imageUrl: string }>(
+        `SELECT id, taskId, imageUrl FROM parent_exports WHERE taskId IN (${placeholders})`,
+        taskIds
+      )
+    ]);
+
+    await Promise.all([
+      ...taskFiles.map((file) => deleteStoredAppFile(file.url, "/uploads/", uploadDirectory)),
+      ...parentExports.map((item) => deleteStoredAppFile(item.imageUrl, "/exports/", exportDirectory))
+    ]);
+
+    await run(`DELETE FROM audit_logs WHERE entityType = 'task' AND entityId IN (${placeholders})`, taskIds);
+    await run(`DELETE FROM parent_exports WHERE taskId IN (${placeholders})`, taskIds);
+    await run(`DELETE FROM task_files WHERE taskId IN (${placeholders})`, taskIds);
+    await run(`DELETE FROM tasks WHERE id IN (${placeholders})`, taskIds);
+
+    await writeAuditLog({
+      actor: "system",
+      action: "old_completed_tasks_cleaned",
+      entityType: "task",
+      entityId: `cleanup-before-${cutoffDate}`,
+      detail: `Deleted ${taskIds.length} completed tasks older than ${oldCompletedTaskRetentionDays} days and ${taskFiles.length} related files`
+    });
+  })()
+    .catch((error) => {
+      console.error("Failed to cleanup old completed tasks", error);
+    })
+    .finally(() => {
+      oldCompletedTaskCleanupAt = Date.now();
+      oldCompletedTaskCleanupPromise = null;
+    });
+
+  return oldCompletedTaskCleanupPromise;
 }
 
 function normalizeUploadedFileName(value: string | undefined | null, fallback = "file") {
@@ -406,7 +530,7 @@ async function readDashboardVersion() {
     get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(createdAt) AS marker FROM users"),
     get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(updatedAt) AS marker FROM students"),
     get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(updatedAt) AS marker FROM tasks"),
-    get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(createdAt) AS marker FROM task_files"),
+    readDashboardVersionMarker().then((marker) => ({ count: 1, marker })),
     get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(createdAt) AS marker FROM shared_files"),
     get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(updatedAt) AS marker FROM print_jobs"),
     get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(createdAt) AS marker FROM audit_logs")
@@ -477,12 +601,60 @@ async function readTaskFileBytes(file: TaskFileRow) {
 
 async function createPdfImageBytes(bytes: Buffer, fileType: string) {
   if (!fileType.startsWith("image/")) return bytes;
+  const lowerFileType = fileType.toLowerCase();
+  if ((lowerFileType === "image/jpeg" || lowerFileType === "image/jpg") && bytes.length <= 3 * 1024 * 1024) {
+    return bytes;
+  }
   return sharp(bytes)
     .rotate()
-    .resize({ width: 1200, height: 1600, fit: "inside", withoutEnlargement: true })
-    .jpeg({ quality: 76, mozjpeg: true })
+    .resize({ width: 900, height: 1280, fit: "inside", withoutEnlargement: true })
+    .jpeg({ quality: 68 })
     .toBuffer()
     .catch(() => bytes);
+}
+
+async function compressUploadedImage(bytes: Buffer, fileType: string) {
+  if (!fileType.startsWith("image/")) return bytes;
+  if (fileType === "image/gif" || fileType === "image/svg+xml") return bytes;
+
+  try {
+    let pipeline = sharp(bytes, { animated: false }).rotate().resize({
+      width: 1600,
+      height: 1600,
+      fit: "inside",
+      withoutEnlargement: true
+    });
+
+    if (fileType === "image/png") {
+      pipeline = pipeline.png({
+        compressionLevel: 9,
+        palette: true,
+        quality: 76
+      });
+    } else if (fileType === "image/webp") {
+      pipeline = pipeline.webp({ quality: 74 });
+    } else {
+      pipeline = pipeline.jpeg({ quality: 72, mozjpeg: true });
+    }
+
+    const compressedBytes = await pipeline.toBuffer();
+    return compressedBytes.length < bytes.length ? compressedBytes : bytes;
+  } catch {
+    return bytes;
+  }
+}
+
+async function prepareStoredUpload(file: Express.Multer.File) {
+  const originalBytes = file.buffer;
+  const storedBytes = file.mimetype.startsWith("image/")
+    ? await compressUploadedImage(originalBytes, file.mimetype)
+    : originalBytes;
+
+  return {
+    originalName: normalizeUploadedFileName(file.originalname, "file"),
+    fileType: file.mimetype ?? "application/octet-stream",
+    storedBytes
+  };
 }
 
 async function readSharedFileBytes(file: SharedFileRow) {
@@ -590,7 +762,7 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper:
 
 async function preloadDailyFeedbackImages(files: TaskFileRow[]) {
   const imageFiles = files.filter((file) => file.fileType.startsWith("image/"));
-  const loadedImages = await mapWithConcurrency(imageFiles, 3, async (file) => {
+  const loadedImages = await mapWithConcurrency(imageFiles, 4, async (file) => {
     const bytes = await readTaskFileBytes(file);
     if (!bytes) return null;
     return { fileId: file.id, bytes: await createPdfImageBytes(bytes, file.fileType) };
@@ -602,8 +774,25 @@ async function preloadDailyFeedbackImages(files: TaskFileRow[]) {
   return imageBytesByFileId;
 }
 
+async function attachDailyFeedbackImageData(files: TaskFileRow[]) {
+  const imageFiles = files.filter((file) => file.fileType.startsWith("image/"));
+  if (!imageFiles.length) return files;
+
+  const placeholders = imageFiles.map(() => "?").join(",");
+  const imageDataRows = await all<Pick<TaskFileRow, "id" | "fileData">>(
+    `SELECT id, fileData
+     FROM task_files
+     WHERE id IN (${placeholders})`,
+    imageFiles.map((file) => file.id)
+  );
+  const imageDataById = new Map(imageDataRows.map((row) => [row.id, row.fileData]));
+  return files.map((file) =>
+    file.fileType.startsWith("image/") ? { ...file, fileData: imageDataById.get(file.id) ?? file.fileData ?? null } : file
+  );
+}
+
 const dailyFeedbackPdfCache = new Map<string, { expiresAt: number; pdf: Buffer }>();
-const dailyFeedbackPdfCacheTtlMs = 10 * 60 * 1000;
+const dailyFeedbackPdfCacheTtlMs = 60 * 60 * 1000;
 const dailyFeedbackPdfCacheMaxEntries = 30;
 
 function createDailyFeedbackCacheKey(input: {
@@ -859,8 +1048,9 @@ app.get("/api/dashboard/version", async (_req, res, next) => {
 
 app.get("/api/dashboard", async (_req, res, next) => {
   try {
-    await markTasksWithCorrectionEvidenceCompleted();
-    const [users, students, tasks, taskFiles, parentExports, printJobs, auditLogs, chatMessages, sharedFiles, version] = await Promise.all([
+    await cleanupOldCompletedTasks();
+    await markTasksWithTaskEvidenceCompleted();
+    const [users, students, tasks, parentExports, printJobs, auditLogs, chatMessages, sharedFiles, version] = await Promise.all([
       all("SELECT * FROM users ORDER BY createdAt ASC"),
       all<StudentRow>(
         `SELECT students.id, students.name, students.grade, students.targetScore, students.currentLevel, students.\`group\` AS \`group\`,
@@ -870,9 +1060,6 @@ app.get("/api/dashboard", async (_req, res, next) => {
          ORDER BY students.createdAt ASC`
       ),
       all<TaskRow>("SELECT * FROM tasks ORDER BY createdAt ASC"),
-      all<TaskFileRow>(
-        "SELECT id, taskId, uploaderId, uploaderRole, name, fileType, url, fileSize, createdAt FROM task_files ORDER BY createdAt ASC"
-      ),
       all("SELECT * FROM parent_exports ORDER BY createdAt DESC"),
       all<PrintJobRow>("SELECT * FROM print_jobs ORDER BY createdAt DESC"),
       all<AuditLogRow>("SELECT * FROM audit_logs ORDER BY createdAt DESC LIMIT 80"),
@@ -882,11 +1069,23 @@ app.get("/api/dashboard", async (_req, res, next) => {
       ),
       readDashboardVersion()
     ]);
-    const tasksWithCorrection = new Set(
-      taskFiles
-        .filter((file) => file.uploaderRole === "assistant" && file.fileType.startsWith("image/"))
-        .map((file) => file.taskId)
+    const relevantTaskIds = getDashboardRelevantTaskIds(tasks, 21);
+    const taskFiles =
+      relevantTaskIds.length > 0
+        ? await all<TaskFileRow>(
+            `SELECT id, taskId, uploaderId, uploaderRole, name, fileType, url, fileSize, createdAt
+             FROM task_files
+             WHERE taskId IN (${relevantTaskIds.map(() => "?").join(", ")})
+             ORDER BY createdAt ASC`,
+            relevantTaskIds
+          )
+        : [];
+    const correctedTaskRows = await all<{ taskId: string }>(
+      `SELECT DISTINCT taskId
+       FROM task_files
+       WHERE uploaderRole = 'assistant' AND fileType LIKE 'image/%'`
     );
+    const tasksWithCorrection = new Set(correctedTaskRows.map((row) => row.taskId));
     const pendingReviewTasks = tasks.filter((task) => task.status !== "completed" && !tasksWithCorrection.has(task.id));
 
     res.json({
@@ -894,6 +1093,8 @@ app.get("/api/dashboard", async (_req, res, next) => {
       students,
       tasks: sortTasksForTeacher(tasks.map(mapTask)),
       taskFiles: taskFiles.map(mapTaskFile),
+      taskFilesLoadedTaskIds: relevantTaskIds,
+      tasksWithCorrection: Array.from(tasksWithCorrection),
       parentExports,
       printJobs: printJobs.map(mapPrintJob),
       auditLogs,
@@ -902,7 +1103,7 @@ app.get("/api/dashboard", async (_req, res, next) => {
       version,
       summary: {
         studentCount: students.length,
-        activeTasks: tasks.filter((task) => task.status !== "completed").length,
+        activeTasks: countTasksWithinDays(tasks, 21),
         pendingReview: pendingReviewTasks.length,
         pendingPrintJobs: printJobs.filter((job) => job.status === "pending").length
       }
@@ -922,13 +1123,14 @@ app.post("/api/shared-files", upload.single("file"), async (req, res, next) => {
     const payload = createSharedFileSchema.parse(req.body);
     const id = createId("sf");
     const timestamp = now();
+    const preparedFile = await prepareStoredUpload(req.file);
     const originalName = normalizeUploadedFileName(req.file.originalname, "shared-file");
     const safeName = basename(originalName).replace(/[^\w.-]+/g, "_");
     const storedName = `${id}-${safeName}`;
     const fileUrl = `/uploads/${storedName}`;
 
     await mkdir(uploadDirectory, { recursive: true });
-    await writeFile(join(uploadDirectory, storedName), req.file.buffer);
+    await writeFile(join(uploadDirectory, storedName), preparedFile.storedBytes);
 
     await run(
       `INSERT INTO shared_files (id, uploaderId, uploaderRole, uploaderName, note, fileName, fileType, fileUrl, fileData, fileSize, createdAt)
@@ -940,10 +1142,10 @@ app.post("/api/shared-files", upload.single("file"), async (req, res, next) => {
         payload.uploaderName,
         payload.note,
         originalName,
-        req.file.mimetype ?? "application/octet-stream",
+        preparedFile.fileType,
         fileUrl,
-        req.file.buffer.toString("base64"),
-        req.file.buffer.length,
+        preparedFile.storedBytes.toString("base64"),
+        preparedFile.storedBytes.length,
         timestamp
       ]
     );
@@ -1262,6 +1464,25 @@ app.delete("/api/student-groups/:groupName", async (req, res, next) => {
     });
 
     res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/tasks/:taskId/files", async (req, res, next) => {
+  try {
+    const taskId = String(req.params.taskId);
+    const task = await get<TaskRow>("SELECT id FROM tasks WHERE id = ?", [taskId]);
+    if (!task) {
+      res.status(404).json({ message: "Task not found" });
+      return;
+    }
+
+    const files = await all<TaskFileRow>(
+      "SELECT id, taskId, uploaderId, uploaderRole, name, fileType, url, fileSize, createdAt FROM task_files WHERE taskId = ? ORDER BY createdAt ASC",
+      [taskId]
+    );
+    res.json(files.map(mapTaskFile));
   } catch (error) {
     next(error);
   }
@@ -1723,14 +1944,15 @@ app.post("/api/tasks/:taskId/files", upload.single("file"), async (req, res, nex
     const safeName = basename(originalName).replace(/[^\w.-]+/g, "_");
     const storedName = `${id}-${safeName}`;
     const fileUrl = `/uploads/${storedName}`;
+    const preparedFile = req.file ? await prepareStoredUpload(req.file) : null;
 
-    if (req.file) {
+    if (preparedFile) {
       await mkdir(uploadDirectory, { recursive: true });
-      await writeFile(join(uploadDirectory, storedName), req.file.buffer);
+      await writeFile(join(uploadDirectory, storedName), preparedFile.storedBytes);
     }
 
-    const fileBuffer = req.file?.buffer;
-    const fileType = req.file?.mimetype ?? "application/octet-stream";
+    const fileBuffer = preparedFile?.storedBytes;
+    const fileType = preparedFile?.fileType ?? "application/octet-stream";
 
     await run(
       `INSERT INTO task_files (id, taskId, uploaderId, uploaderRole, name, fileType, url, fileData, fileSize, createdAt)
@@ -1755,7 +1977,11 @@ app.post("/api/tasks/:taskId/files", upload.single("file"), async (req, res, nex
       entityId: task.id,
       detail: `${String(req.body.uploaderRole ?? "teacher")} uploaded ${originalName}`
     });
-    if (String(req.body.uploaderRole ?? "teacher") === "assistant" && fileType.startsWith("image/")) {
+    const uploaderRole = String(req.body.uploaderRole ?? "teacher");
+    if (
+      uploaderRole === "student" ||
+      (uploaderRole === "assistant" && fileType.startsWith("image/"))
+    ) {
       await run("UPDATE tasks SET status = 'completed', updatedAt = ? WHERE id = ?", [now(), task.id]);
     }
 
@@ -2011,12 +2237,13 @@ app.get("/api/students/:studentId/daily-feedback.pdf", async (req, res, next) =>
           tasks.map((task) => task.id)
         )
       : [];
-    const cacheKey = createDailyFeedbackCacheKey({ student, tasks, taskFiles, date });
+    const taskFilesWithImageData = await attachDailyFeedbackImageData(taskFiles);
+    const cacheKey = createDailyFeedbackCacheKey({ student, tasks, taskFiles: taskFilesWithImageData, date });
     const cachedPdf = dailyFeedbackPdfCache.get(cacheKey);
     const pdf =
       cachedPdf && cachedPdf.expiresAt > Date.now()
         ? cachedPdf.pdf
-        : await createDailyFeedbackPdf({ student, tasks, taskFiles, date });
+        : await createDailyFeedbackPdf({ student, tasks, taskFiles: taskFilesWithImageData, date });
     if (!cachedPdf || cachedPdf.expiresAt <= Date.now()) {
       rememberDailyFeedbackPdf(cacheKey, pdf);
     }
