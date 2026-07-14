@@ -13,7 +13,6 @@ import {
   Loader2,
   LockKeyhole,
   Plus,
-  Printer,
   Settings,
   ShieldCheck,
   Sparkles,
@@ -88,6 +87,12 @@ const teacherOnboardingSteps = [
     title: "上传批改或加入打印",
     text: "在任务卡片上传批改文件；已结束任务可从待批改列表移除。"
   }
+];
+const todayFocusItems = [
+  "学生离校 check 任务照片都已批改并已上传",
+  "批改上传 老师评语处 请备注 错误率 罗列错误单词",
+  "所有任务设置时请标好序号",
+  "口语评价根据每个问题，请给出1-2个具体的idea review"
 ];
 
 function wait(ms: number) {
@@ -531,6 +536,8 @@ function App() {
   const [isTeacherGuideOpen, setIsTeacherGuideOpen] = useState(false);
   const [isTeacherGuidePreviewOpen, setIsTeacherGuidePreviewOpen] = useState(false);
   const [teacherGuideStep, setTeacherGuideStep] = useState(0);
+  const [isTeacherFocusChecklistOpen, setIsTeacherFocusChecklistOpen] = useState(false);
+  const [teacherFocusCheckedItems, setTeacherFocusCheckedItems] = useState<boolean[]>(() => todayFocusItems.map(() => false));
   const [toast, setToast] = useState<{ message: string; tone: "success" | "error" } | null>(null);
   const dashboardRef = useRef<DashboardData | null>(null);
   const isLoadingDashboardRef = useRef(false);
@@ -745,6 +752,16 @@ function App() {
   }, [selectedStudentId, selectedTeacherGroup, isPendingReviewListOpen]);
 
   useEffect(() => {
+    if (portalMode !== "teacher") {
+      setIsTeacherFocusChecklistOpen(false);
+      setTeacherFocusCheckedItems(todayFocusItems.map(() => false));
+      return;
+    }
+    setTeacherFocusCheckedItems(todayFocusItems.map(() => false));
+    setIsTeacherFocusChecklistOpen(true);
+  }, [portalMode]);
+
+  useEffect(() => {
     if (portalMode !== "teacher") return;
     if (window.localStorage.getItem(teacherGuideStorageKey)) return;
     setTeacherGuideStep(0);
@@ -867,7 +884,7 @@ function App() {
       tasks: nextTasks,
       summary: {
         ...currentDashboard.summary,
-        activeTasks: countTasksWithinDays(nextTasks, 21),
+        activeTasks: countTasksWithinDays(nextTasks, 14),
         pendingReview: nextTasks.filter((task) => task.status !== "completed" && !correctedTaskIds.has(task.id)).length
       }
     };
@@ -1651,6 +1668,7 @@ function App() {
   const teacherGroups = groupStudentsByTeacher(dashboard.students, dashboard.users).filter(
     (teacher) => !hiddenTeacherIds.has(teacher.teacherId)
   );
+  const isTeacherFocusChecklistComplete = teacherFocusCheckedItems.every(Boolean);
   const normalizedStudentSearch = studentSearchQuery.trim().toLowerCase();
   const filteredTeacherGroups = normalizedStudentSearch
     ? teacherGroups
@@ -1704,7 +1722,11 @@ function App() {
             <div className="hero-panel teacher-hero-panel">
               <Sparkles size={28} />
               <strong>今日重点</strong>
-              <span>{dashboard.summary.pendingReview} 个任务等待批改，{dashboard.summary.pendingPrintJobs} 个文件在打印队列中。</span>
+              <ol className="today-focus-list">
+                {todayFocusItems.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ol>
             </div>
           </section>
 
@@ -1712,9 +1734,9 @@ function App() {
             <Metric icon={<GraduationCap />} label="学生数量" value={dashboard.summary.studentCount} />
             <Metric
               icon={<ClipboardList />}
-              label="21天内总任务"
+              label="14天内总任务"
               value={dashboard.summary.activeTasks}
-              helper="查看21天内全部学生任务"
+              helper="查看14天内全部学生任务"
               onClick={() => {
                 setSelectedStudentId("all");
                 setSelectedTeacherGroup(null);
@@ -1727,18 +1749,9 @@ function App() {
               label="待批改"
               value={dashboard.summary.pendingReview}
               helper="查看全部待批改任务"
+              className="review-wide"
+              sideNote="直接点击此button， 已确认当日任务已全部批改完成！！！"
               onClick={locatePendingReviewTask}
-            />
-            <Metric
-              icon={<Printer />}
-              label="打印队列"
-              value={dashboard.summary.pendingPrintJobs}
-              helper="添加打印文件"
-              highlight={isTeacherGuideOpen && teacherGuideStep === 2}
-              onClick={() => {
-                setPrintError("");
-                setIsPrintFormOpen(true);
-              }}
             />
           </div>
         </div>
@@ -2160,6 +2173,40 @@ function App() {
       )}
 
       {toast && <div className={`toast-message ${toast.tone}`}>{toast.message}</div>}
+
+      {isTeacherFocusChecklistOpen && (
+        <div className="modal-backdrop focus-checklist-backdrop" role="presentation">
+          <section className="confirm-dialog focus-checklist-dialog" role="dialog" aria-modal="true" aria-labelledby="teacher-focus-title">
+            <p className="eyebrow">Today Checklist</p>
+            <h2 id="teacher-focus-title">今日重点确认</h2>
+            <p>请逐项确认后进入教师界面。</p>
+            <div className="focus-checklist">
+              {todayFocusItems.map((item, index) => (
+                <label key={item} className={teacherFocusCheckedItems[index] ? "checked" : ""}>
+                  <input
+                    type="checkbox"
+                    checked={teacherFocusCheckedItems[index]}
+                    onChange={(event) =>
+                      setTeacherFocusCheckedItems((current) =>
+                        current.map((checked, itemIndex) => (itemIndex === index ? event.target.checked : checked))
+                      )
+                    }
+                  />
+                  <span>{item}</span>
+                </label>
+              ))}
+            </div>
+            <button
+              type="button"
+              className="submit-button"
+              disabled={!isTeacherFocusChecklistComplete}
+              onClick={() => setIsTeacherFocusChecklistOpen(false)}
+            >
+              进入教师界面
+            </button>
+          </section>
+        </div>
+      )}
 
       {isTeacherGuidePreviewOpen && <GuidePreviewModal onClose={() => setIsTeacherGuidePreviewOpen(false)} />}
 
@@ -3428,7 +3475,9 @@ function Metric({
   helper,
   onClick,
   tone,
-  highlight
+  highlight,
+  className,
+  sideNote
 }: {
   icon: React.ReactNode;
   label: string;
@@ -3437,14 +3486,22 @@ function Metric({
   onClick?: () => void;
   tone?: "print";
   highlight?: boolean;
+  className?: string;
+  sideNote?: string;
 }) {
   const Element = onClick ? "button" : "article";
+  const metricClassName = [
+    tone ? `metric-card ${tone}` : "metric-card",
+    className,
+    highlight ? "guide-highlight" : ""
+  ].filter(Boolean).join(" ");
   return (
-    <Element className={`${tone ? `metric-card ${tone}` : "metric-card"}${highlight ? " guide-highlight" : ""}`} onClick={onClick}>
+    <Element className={metricClassName} onClick={onClick}>
       <div>{icon}</div>
       <span>{label}</span>
       <strong>{value}</strong>
       {helper && <em>{helper}</em>}
+      {sideNote && <p>{sideNote}</p>}
     </Element>
   );
 }

@@ -109,7 +109,7 @@ const port = Number(process.env.PORT ?? 4000);
 const host = process.env.HOST ?? "0.0.0.0";
 const uploadDirectory = fileURLToPath(new URL("../data/uploads", import.meta.url));
 const exportDirectory = fileURLToPath(new URL("../data/exports", import.meta.url));
-const oldCompletedTaskRetentionDays = 21;
+const oldCompletedTaskRetentionDays = 14;
 const oldCompletedTaskCleanupIntervalMs = 12 * 60 * 60 * 1000;
 let oldCompletedTaskCleanupAt = 0;
 let oldCompletedTaskCleanupPromise: Promise<void> | null = null;
@@ -1069,7 +1069,7 @@ app.get("/api/dashboard", async (_req, res, next) => {
       ),
       readDashboardVersion()
     ]);
-    const relevantTaskIds = getDashboardRelevantTaskIds(tasks, 21);
+    const relevantTaskIds = getDashboardRelevantTaskIds(tasks, 14);
     const taskFiles =
       relevantTaskIds.length > 0
         ? await all<TaskFileRow>(
@@ -1103,7 +1103,7 @@ app.get("/api/dashboard", async (_req, res, next) => {
       version,
       summary: {
         studentCount: students.length,
-        activeTasks: countTasksWithinDays(tasks, 21),
+        activeTasks: countTasksWithinDays(tasks, 14),
         pendingReview: pendingReviewTasks.length,
         pendingPrintJobs: printJobs.filter((job) => job.status === "pending").length
       }

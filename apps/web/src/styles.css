@@ -376,10 +376,10 @@ p {
 }
 
 .teacher-hero-panel {
-  min-height: 168px;
-  max-width: 420px;
+  min-height: 250px;
+  max-width: 470px;
   margin-left: auto;
-  padding: 22px 24px;
+  padding: 26px 28px;
   justify-self: end;
 }
 
@@ -390,6 +390,19 @@ p {
 .teacher-hero-panel span {
   font-size: 0.92rem;
   line-height: 1.6;
+}
+
+.today-focus-list {
+  position: relative;
+  margin: 0;
+  padding-left: 1.2rem;
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.today-focus-list li + li {
+  margin-top: 6px;
 }
 
 .top-dashboard {
@@ -501,6 +514,35 @@ button.metric-card {
   font-size: 0.82rem;
   font-style: normal;
   font-weight: 900;
+}
+
+.metric-card.review-wide {
+  grid-column: span 2;
+  grid-template-columns: 56px minmax(96px, 0.56fr) minmax(250px, 1fr);
+  grid-template-rows: auto auto auto;
+  align-items: center;
+  align-content: center;
+  column-gap: 18px;
+}
+
+.metric-card.review-wide div {
+  grid-row: 1 / 4;
+}
+
+.metric-card.review-wide span,
+.metric-card.review-wide strong,
+.metric-card.review-wide em {
+  grid-column: 2;
+}
+
+.metric-card.review-wide p {
+  grid-column: 3;
+  grid-row: 1 / 4;
+  margin: 0;
+  color: #b42318;
+  font-size: 1.08rem;
+  font-weight: 950;
+  line-height: 1.45;
 }
 
 .metric-card.print {
@@ -2575,6 +2617,62 @@ blockquote span {
   line-height: 1.8;
 }
 
+.focus-checklist-backdrop {
+  z-index: 70;
+}
+
+.focus-checklist-dialog {
+  width: min(620px, 100%);
+  display: grid;
+  gap: 16px;
+}
+
+.focus-checklist-dialog h2 {
+  margin: -4px 0 0;
+  font-size: 2rem;
+  letter-spacing: -0.05em;
+}
+
+.focus-checklist-dialog .submit-button {
+  margin-top: 4px;
+}
+
+.focus-checklist-dialog .submit-button:disabled {
+  cursor: not-allowed;
+}
+
+.focus-checklist {
+  display: grid;
+  gap: 10px;
+}
+
+.focus-checklist label {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 12px;
+  align-items: flex-start;
+  padding: 14px;
+  border: 1px solid rgba(15, 118, 94, 0.16);
+  border-radius: 18px;
+  color: var(--green-dark);
+  background: rgba(255, 255, 255, 0.64);
+  font-weight: 850;
+  line-height: 1.55;
+  cursor: pointer;
+}
+
+.focus-checklist label.checked {
+  border-color: rgba(15, 118, 94, 0.36);
+  background: rgba(225, 244, 231, 0.9);
+}
+
+.focus-checklist input {
+  width: 19px;
+  height: 19px;
+  margin-top: 2px;
+  accent-color: var(--green);
+}
+
 .confirm-actions {
   display: flex;
   justify-content: flex-end;
@@ -3150,9 +3248,9 @@ blockquote span {
   .teacher-hero-panel {
     width: 100%;
     max-width: none;
-    min-height: 112px;
+    min-height: 250px;
     margin: 4px 0 0;
-    padding: 18px;
+    padding: 22px 20px;
     border-radius: 24px;
   }
 
@@ -3162,6 +3260,34 @@ blockquote span {
 
   .teacher-hero-panel span {
     font-size: 0.84rem;
+  }
+
+  .today-focus-list {
+    font-size: 0.82rem;
+    line-height: 1.5;
+    padding-left: 1.1rem;
+  }
+
+  .focus-checklist-dialog {
+    max-height: calc(100vh - 32px);
+    overflow: auto;
+    padding: 22px;
+    border-radius: 26px;
+    gap: 13px;
+  }
+
+  .focus-checklist-dialog h2 {
+    font-size: 1.58rem;
+  }
+
+  .focus-checklist-dialog p {
+    line-height: 1.6;
+  }
+
+  .focus-checklist label {
+    padding: 12px;
+    font-size: 0.88rem;
+    line-height: 1.48;
   }
 
   .top-dashboard-main .metric-grid {
@@ -3207,6 +3333,32 @@ blockquote span {
   .metric-card em {
     font-size: 0.78rem;
     line-height: 1.35;
+  }
+
+  .metric-card.review-wide {
+    flex: 0 0 306px;
+    grid-column: auto;
+    grid-template-columns: 42px minmax(0, 1fr);
+    grid-template-rows: auto auto auto auto;
+    column-gap: 12px;
+  }
+
+  .metric-card.review-wide div {
+    grid-row: 1 / 4;
+  }
+
+  .metric-card.review-wide span,
+  .metric-card.review-wide strong,
+  .metric-card.review-wide em {
+    grid-column: 2;
+  }
+
+  .metric-card.review-wide p {
+    grid-column: 1 / -1;
+    grid-row: 4;
+    margin-top: 8px;
+    font-size: 0.9rem;
+    line-height: 1.42;
   }
 
   .top-dashboard-side {
