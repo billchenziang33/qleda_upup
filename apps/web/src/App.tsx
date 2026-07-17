@@ -884,7 +884,7 @@ function App() {
       tasks: nextTasks,
       summary: {
         ...currentDashboard.summary,
-        activeTasks: countTasksWithinDays(nextTasks, 14),
+        activeTasks: countTasksWithinDays(nextTasks, 3),
         pendingReview: nextTasks.filter((task) => task.status !== "completed" && !correctedTaskIds.has(task.id)).length
       }
     };
@@ -1734,9 +1734,9 @@ function App() {
             <Metric icon={<GraduationCap />} label="学生数量" value={dashboard.summary.studentCount} />
             <Metric
               icon={<ClipboardList />}
-              label="14天内总任务"
+              label="3天内总任务"
               value={dashboard.summary.activeTasks}
-              helper="查看14天内全部学生任务"
+              helper="查看3天内全部学生任务"
               onClick={() => {
                 setSelectedStudentId("all");
                 setSelectedTeacherGroup(null);
