@@ -103,6 +103,30 @@ interface SharedFileRow {
   createdAt: string;
 }
 
+interface DailyCheckEntryRow {
+  id: string;
+  dateKey: string;
+  teacherId: string;
+  className: string;
+  studentId: string;
+  columnKey: string;
+  checked: number;
+  note: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface DailyCheckTaskNoteRow {
+  id: string;
+  dateKey: string;
+  teacherId: string;
+  className: string;
+  columnKey: string;
+  note: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 const port = Number(process.env.PORT ?? 4000);
@@ -225,6 +249,24 @@ const createSharedFileSchema = z.object({
   uploaderRole: z.enum(["teacher", "assistant"]).default("teacher"),
   uploaderName: z.string().trim().min(1).max(40),
   note: z.string().trim().max(300).default("")
+});
+
+const dailyCheckEntrySchema = z.object({
+  dateKey: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  teacherId: z.string().min(1),
+  className: z.string().trim().min(1).max(255),
+  studentId: z.string().min(1),
+  columnKey: z.string().trim().min(1).max(80),
+  checked: z.boolean(),
+  note: z.string().trim().max(500).default("")
+});
+
+const dailyCheckTaskNoteSchema = z.object({
+  dateKey: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  teacherId: z.string().min(1),
+  className: z.string().trim().min(1).max(255),
+  columnKey: z.string().trim().min(1).max(80),
+  note: z.string().trim().max(500).default("")
 });
 
 const priorityRank: Record<Priority, number> = {
@@ -475,6 +517,13 @@ function mapSharedFile(file: SharedFileRow) {
   };
 }
 
+function mapDailyCheckEntry(entry: DailyCheckEntryRow) {
+  return {
+    ...entry,
+    checked: Boolean(entry.checked)
+  };
+}
+
 function sortTasksForTeacher<T extends { pinned: boolean; status: string; priority: string; dueDate: string }>(input: T[]) {
   return [...input].sort((a, b) => {
     if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
@@ -515,6 +564,17 @@ function getDateKey(value: string | null | undefined) {
   return String(value ?? "").trim().replace(/\//g, "-").slice(0, 10);
 }
 
+function getShanghaiDateKey(value = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(value);
+  const partMap = new Map(parts.map((part) => [part.type, part.value]));
+  return `${partMap.get("year")}-${partMap.get("month")}-${partMap.get("day")}`;
+}
+
 function stripControlCharacters(value: string | null | undefined) {
   return String(value ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").trim();
 }
@@ -526,14 +586,16 @@ function pdfSafeText(value: string | null | undefined, fallback = "-") {
 }
 
 async function readDashboardVersion() {
-  const [users, students, tasks, taskFiles, sharedFiles, printJobs, auditLogs] = await Promise.all([
+  const [users, students, tasks, taskFiles, sharedFiles, printJobs, auditLogs, dailyCheckEntries, dailyCheckTaskNotes] = await Promise.all([
     get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(createdAt) AS marker FROM users"),
     get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(updatedAt) AS marker FROM students"),
     get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(updatedAt) AS marker FROM tasks"),
     readDashboardVersionMarker().then((marker) => ({ count: 1, marker })),
     get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(createdAt) AS marker FROM shared_files"),
     get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(updatedAt) AS marker FROM print_jobs"),
-    get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(createdAt) AS marker FROM audit_logs")
+    get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(createdAt) AS marker FROM audit_logs"),
+    get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(updatedAt) AS marker FROM daily_check_entries"),
+    get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(updatedAt) AS marker FROM daily_check_task_notes")
   ]);
 
   return [
@@ -543,7 +605,9 @@ async function readDashboardVersion() {
     taskFiles,
     sharedFiles,
     printJobs,
-    auditLogs
+    auditLogs,
+    dailyCheckEntries,
+    dailyCheckTaskNotes
   ]
     .map((part) => `${part?.count ?? 0}:${part?.marker ?? ""}`)
     .join("|");
@@ -1050,7 +1114,8 @@ app.get("/api/dashboard", async (_req, res, next) => {
   try {
     await cleanupOldCompletedTasks();
     await markTasksWithTaskEvidenceCompleted();
-    const [users, students, tasks, parentExports, printJobs, auditLogs, chatMessages, sharedFiles, version] = await Promise.all([
+    const todayDateKey = getShanghaiDateKey();
+    const [users, students, tasks, parentExports, printJobs, auditLogs, chatMessages, sharedFiles, dailyCheckEntries, dailyCheckTaskNotes, version] = await Promise.all([
       all("SELECT * FROM users ORDER BY createdAt ASC"),
       all<StudentRow>(
         `SELECT students.id, students.name, students.grade, students.targetScore, students.currentLevel, students.\`group\` AS \`group\`,
@@ -1067,6 +1132,8 @@ app.get("/api/dashboard", async (_req, res, next) => {
       all<SharedFileRow>(
         "SELECT id, uploaderId, uploaderRole, uploaderName, note, fileName, fileType, fileUrl, fileSize, createdAt FROM shared_files ORDER BY createdAt DESC LIMIT 40"
       ),
+      all<DailyCheckEntryRow>("SELECT * FROM daily_check_entries WHERE dateKey = ? ORDER BY updatedAt DESC", [todayDateKey]),
+      all<DailyCheckTaskNoteRow>("SELECT * FROM daily_check_task_notes WHERE dateKey = ? ORDER BY updatedAt DESC", [todayDateKey]),
       readDashboardVersion()
     ]);
     const relevantTaskIds = getDashboardRelevantTaskIds(tasks, 3);
@@ -1100,6 +1167,8 @@ app.get("/api/dashboard", async (_req, res, next) => {
       auditLogs,
       chatMessages: chatMessages.reverse(),
       sharedFiles: sharedFiles.map(mapSharedFile),
+      dailyCheckEntries: dailyCheckEntries.map(mapDailyCheckEntry),
+      dailyCheckTaskNotes,
       version,
       summary: {
         studentCount: students.length,
@@ -1108,6 +1177,79 @@ app.get("/api/dashboard", async (_req, res, next) => {
         pendingPrintJobs: printJobs.filter((job) => job.status === "pending").length
       }
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/daily-check-entries", async (req, res, next) => {
+  try {
+    const payload = dailyCheckEntrySchema.parse(req.body);
+    const timestamp = now();
+    const checkedValue = payload.checked ? 1 : 0;
+    let id = createId("dce");
+
+    if (databaseType() === "mysql") {
+      await run(
+        `INSERT INTO daily_check_entries (id, dateKey, teacherId, className, studentId, columnKey, checked, note, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE checked = VALUES(checked), note = VALUES(note), updatedAt = VALUES(updatedAt)`,
+        [id, payload.dateKey, payload.teacherId, payload.className, payload.studentId, payload.columnKey, checkedValue, payload.note, timestamp, timestamp]
+      );
+    } else {
+      await run(
+        `INSERT INTO daily_check_entries (id, dateKey, teacherId, className, studentId, columnKey, checked, note, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(dateKey, teacherId, className, studentId, columnKey)
+         DO UPDATE SET checked = excluded.checked, note = excluded.note, updatedAt = excluded.updatedAt`,
+        [id, payload.dateKey, payload.teacherId, payload.className, payload.studentId, payload.columnKey, checkedValue, payload.note, timestamp, timestamp]
+      );
+    }
+
+    const saved = await get<DailyCheckEntryRow>(
+      `SELECT * FROM daily_check_entries
+       WHERE dateKey = ? AND teacherId = ? AND className = ? AND studentId = ? AND columnKey = ?`,
+      [payload.dateKey, payload.teacherId, payload.className, payload.studentId, payload.columnKey]
+    );
+    if (saved) id = saved.id;
+    await touchDashboardVersion(timestamp);
+    res.json(saved ? mapDailyCheckEntry(saved) : { id, ...payload, createdAt: timestamp, updatedAt: timestamp });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/daily-check-task-notes", async (req, res, next) => {
+  try {
+    const payload = dailyCheckTaskNoteSchema.parse(req.body);
+    const timestamp = now();
+    let id = createId("dctn");
+
+    if (databaseType() === "mysql") {
+      await run(
+        `INSERT INTO daily_check_task_notes (id, dateKey, teacherId, className, columnKey, note, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE note = VALUES(note), updatedAt = VALUES(updatedAt)`,
+        [id, payload.dateKey, payload.teacherId, payload.className, payload.columnKey, payload.note, timestamp, timestamp]
+      );
+    } else {
+      await run(
+        `INSERT INTO daily_check_task_notes (id, dateKey, teacherId, className, columnKey, note, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(dateKey, teacherId, className, columnKey)
+         DO UPDATE SET note = excluded.note, updatedAt = excluded.updatedAt`,
+        [id, payload.dateKey, payload.teacherId, payload.className, payload.columnKey, payload.note, timestamp, timestamp]
+      );
+    }
+
+    const saved = await get<DailyCheckTaskNoteRow>(
+      `SELECT * FROM daily_check_task_notes
+       WHERE dateKey = ? AND teacherId = ? AND className = ? AND columnKey = ?`,
+      [payload.dateKey, payload.teacherId, payload.className, payload.columnKey]
+    );
+    if (saved) id = saved.id;
+    await touchDashboardVersion(timestamp);
+    res.json(saved ?? { id, ...payload, createdAt: timestamp, updatedAt: timestamp });
   } catch (error) {
     next(error);
   }

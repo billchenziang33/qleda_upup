@@ -115,6 +115,30 @@ export interface SharedFile {
   createdAt: string;
 }
 
+export interface DailyCheckEntry {
+  id: string;
+  dateKey: string;
+  teacherId: string;
+  className: string;
+  studentId: string;
+  columnKey: string;
+  checked: boolean;
+  note: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DailyCheckTaskNote {
+  id: string;
+  dateKey: string;
+  teacherId: string;
+  className: string;
+  columnKey: string;
+  note: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface DashboardData {
   version: string;
   users: User[];
@@ -128,6 +152,8 @@ export interface DashboardData {
   auditLogs: AuditLog[];
   chatMessages: ChatMessage[];
   sharedFiles: SharedFile[];
+  dailyCheckEntries: DailyCheckEntry[];
+  dailyCheckTaskNotes: DailyCheckTaskNote[];
   summary: {
     studentCount: number;
     activeTasks: number;

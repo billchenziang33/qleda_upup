@@ -159,6 +159,32 @@ function sqliteSchema(db: Database) {
       createdAt TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS daily_check_entries (
+      id TEXT PRIMARY KEY,
+      dateKey TEXT NOT NULL,
+      teacherId TEXT NOT NULL,
+      className TEXT NOT NULL,
+      studentId TEXT NOT NULL,
+      columnKey TEXT NOT NULL,
+      checked INTEGER NOT NULL DEFAULT 0,
+      note TEXT NOT NULL DEFAULT '',
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL,
+      UNIQUE (dateKey, teacherId, className, studentId, columnKey)
+    );
+
+    CREATE TABLE IF NOT EXISTS daily_check_task_notes (
+      id TEXT PRIMARY KEY,
+      dateKey TEXT NOT NULL,
+      teacherId TEXT NOT NULL,
+      className TEXT NOT NULL,
+      columnKey TEXT NOT NULL,
+      note TEXT NOT NULL DEFAULT '',
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL,
+      UNIQUE (dateKey, teacherId, className, columnKey)
+    );
+
     CREATE TABLE IF NOT EXISTS dashboard_versions (
       id TEXT PRIMARY KEY,
       marker TEXT NOT NULL,
@@ -171,6 +197,8 @@ function sqliteSchema(db: Database) {
     CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(createdAt);
     CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages(createdAt);
     CREATE INDEX IF NOT EXISTS idx_shared_files_created ON shared_files(createdAt);
+    CREATE INDEX IF NOT EXISTS idx_daily_check_entries_date ON daily_check_entries(dateKey);
+    CREATE INDEX IF NOT EXISTS idx_daily_check_task_notes_date ON daily_check_task_notes(dateKey);
   `);
 }
 
@@ -294,6 +322,32 @@ const mysqlStatements = [
     fileSize BIGINT,
     createdAt VARCHAR(40) NOT NULL,
     INDEX idx_shared_files_created (createdAt)
+  )`,
+  `CREATE TABLE IF NOT EXISTS daily_check_entries (
+    id VARCHAR(80) PRIMARY KEY,
+    dateKey VARCHAR(20) NOT NULL,
+    teacherId VARCHAR(80) NOT NULL,
+    className VARCHAR(255) NOT NULL,
+    studentId VARCHAR(80) NOT NULL,
+    columnKey VARCHAR(80) NOT NULL,
+    checked TINYINT NOT NULL DEFAULT 0,
+    note TEXT NOT NULL,
+    createdAt VARCHAR(40) NOT NULL,
+    updatedAt VARCHAR(40) NOT NULL,
+    UNIQUE KEY uniq_daily_check_entry (dateKey, teacherId, className, studentId, columnKey),
+    INDEX idx_daily_check_entries_date (dateKey)
+  )`,
+  `CREATE TABLE IF NOT EXISTS daily_check_task_notes (
+    id VARCHAR(80) PRIMARY KEY,
+    dateKey VARCHAR(20) NOT NULL,
+    teacherId VARCHAR(80) NOT NULL,
+    className VARCHAR(255) NOT NULL,
+    columnKey VARCHAR(80) NOT NULL,
+    note TEXT NOT NULL,
+    createdAt VARCHAR(40) NOT NULL,
+    updatedAt VARCHAR(40) NOT NULL,
+    UNIQUE KEY uniq_daily_check_task_note (dateKey, teacherId, className, columnKey),
+    INDEX idx_daily_check_task_notes_date (dateKey)
   )`,
   `CREATE TABLE IF NOT EXISTS dashboard_versions (
     id VARCHAR(80) PRIMARY KEY,

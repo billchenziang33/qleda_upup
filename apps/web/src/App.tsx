@@ -42,12 +42,27 @@ import {
   resolveApiUrl,
   renameTeacherGroup,
   updateTeacherName,
+  updateDailyCheckEntry,
   updatePrintJob,
   updateStudent,
   updateTask,
+  updateDailyCheckTaskNote,
   uploadTaskFile
 } from "./api";
-import type { CreateStudentInput, CreateTaskInput, DashboardData, SharedFile, Student, Task, TaskFile, TaskStatus, User } from "./types";
+import { CurtainBrandHero } from "./CurtainBrandHero";
+import type {
+  CreateStudentInput,
+  CreateTaskInput,
+  DailyCheckEntry,
+  DailyCheckTaskNote,
+  DashboardData,
+  SharedFile,
+  Student,
+  Task,
+  TaskFile,
+  TaskStatus,
+  User
+} from "./types";
 
 const statusLabels: Record<TaskStatus, string> = {
   not_started: "未开始",
@@ -93,6 +108,16 @@ const todayFocusItems = [
   "批改上传 老师评语处 请备注 错误率 罗列错误单词",
   "所有任务设置时请标好序号",
   "口语评价根据每个问题，请给出1-2个具体的idea review"
+];
+
+const dailyCheckColumns = [
+  { key: "list", label: "list" },
+  { key: "reading", label: "阅读作业" },
+  { key: "listening", label: "听力作业" },
+  { key: "vocab_cn", label: "答案词（中）" },
+  { key: "vocab_en", label: "答案词（英）" },
+  { key: "speaking", label: "口语（2话题）" },
+  { key: "writing", label: "写作作业" }
 ];
 
 function wait(ms: number) {
@@ -526,6 +551,10 @@ function App() {
   const [sharedFileError, setSharedFileError] = useState("");
   const [isSavingSharedFile, setIsSavingSharedFile] = useState(false);
   const [deletingSharedFileId, setDeletingSharedFileId] = useState<string | null>(null);
+  const [dailyCheckClassSearchQuery, setDailyCheckClassSearchQuery] = useState("");
+  const [selectedDailyCheckClassKey, setSelectedDailyCheckClassKey] = useState("");
+  const [savingDailyCheckKey, setSavingDailyCheckKey] = useState<string | null>(null);
+  const [savingDailyCheckTaskNoteKey, setSavingDailyCheckTaskNoteKey] = useState<string | null>(null);
   const [printQueueSearchQuery, setPrintQueueSearchQuery] = useState("");
   const [isAuditExpanded, setIsAuditExpanded] = useState(false);
   const [isTaskListExpanded, setIsTaskListExpanded] = useState(false);
@@ -627,7 +656,9 @@ function App() {
           ]);
           const mergedDashboard: DashboardData = {
             ...nextDashboard,
-            taskFiles: [...nextDashboard.taskFiles, ...cachedTaskFiles]
+            taskFiles: [...nextDashboard.taskFiles, ...cachedTaskFiles],
+            dailyCheckEntries: nextDashboard.dailyCheckEntries ?? [],
+            dailyCheckTaskNotes: nextDashboard.dailyCheckTaskNotes ?? []
           };
           if (!options.silent && !dashboardRef.current) {
             setApiLoadProgress({
@@ -1432,6 +1463,81 @@ function App() {
     }
   }
 
+  async function handleSaveDailyCheckEntry(input: {
+    dateKey: string;
+    teacherId: string;
+    className: string;
+    studentId: string;
+    columnKey: string;
+    checked: boolean;
+    note: string;
+  }) {
+    const savingKey = `${input.dateKey}::${input.teacherId}::${input.className}::${input.studentId}::${input.columnKey}`;
+    setSavingDailyCheckKey(savingKey);
+
+    try {
+      const saved = await updateDailyCheckEntry(input);
+      setDashboard((current) => {
+        if (!current) return current;
+        const nextEntries = (current.dailyCheckEntries ?? []).filter(
+          (entry) =>
+            !(
+              entry.dateKey === saved.dateKey &&
+              entry.teacherId === saved.teacherId &&
+              entry.className === saved.className &&
+              entry.studentId === saved.studentId &&
+              entry.columnKey === saved.columnKey
+            )
+        );
+        return {
+          ...current,
+          dailyCheckEntries: [...nextEntries, saved],
+          version: `${current.version}:daily-check:${saved.updatedAt}`
+        };
+      });
+    } catch {
+      window.alert("每日任务打卡保存失败，请确认后端服务正常。");
+    } finally {
+      setSavingDailyCheckKey(null);
+    }
+  }
+
+  async function handleSaveDailyCheckTaskNote(input: {
+    dateKey: string;
+    teacherId: string;
+    className: string;
+    columnKey: string;
+    note: string;
+  }) {
+    const savingKey = makeDailyCheckTaskNoteKey(input.dateKey, input.teacherId, input.className, input.columnKey);
+    setSavingDailyCheckTaskNoteKey(savingKey);
+
+    try {
+      const saved = await updateDailyCheckTaskNote(input);
+      setDashboard((current) => {
+        if (!current) return current;
+        const nextNotes = (current.dailyCheckTaskNotes ?? []).filter(
+          (note) =>
+            !(
+              note.dateKey === saved.dateKey &&
+              note.teacherId === saved.teacherId &&
+              note.className === saved.className &&
+              note.columnKey === saved.columnKey
+            )
+        );
+        return {
+          ...current,
+          dailyCheckTaskNotes: [...nextNotes, saved],
+          version: `${current.version}:daily-check-task-note:${saved.updatedAt}`
+        };
+      });
+    } catch {
+      window.alert("每日任务备注保存失败，请确认后端服务正常。");
+    } finally {
+      setSavingDailyCheckTaskNoteKey((current) => (current === savingKey ? null : current));
+    }
+  }
+
   function openPrintQueue() {
     document.getElementById("print-queue-panel")?.scrollIntoView({
       behavior: "smooth",
@@ -1707,18 +1813,7 @@ function App() {
       <section className="top-dashboard">
         <div className="top-dashboard-main">
           <section className="hero-card">
-            <div className="brand-title-wrap" aria-label="QULEDA">
-              <p className="brand-kicker">IELTS Teaching Operations</p>
-              <h1 className="brand-title">
-                <span>Q</span>
-                  <span>U</span>
-                <span>L</span>
-                <span>E</span>
-                <span>D</span>
-                <span>A</span>
-              </h1>
-              <p className="brand-subtitle">Teaching task flow</p>
-            </div>
+            <CurtainBrandHero className="teacher-dashboard-curtain" />
             <div className="hero-panel teacher-hero-panel">
               <Sparkles size={28} />
               <strong>今日重点</strong>
@@ -1756,18 +1851,19 @@ function App() {
           </div>
         </div>
         <div className="top-dashboard-side">
-          <SharedFilesPanel
-            files={dashboard.sharedFiles}
-            error={sharedFileError}
-            uploadFile={sharedFileUpload}
-            searchQuery={sharedFileSearchQuery}
-            isSaving={isSavingSharedFile}
-            deletingFileId={deletingSharedFileId}
-            onFileChange={setSharedFileUpload}
-            onSearchChange={setSharedFileSearchQuery}
-            onSubmit={handleCreateSharedFile}
-            onPreview={(file) => setPreviewFile({ name: file.fileName, url: file.fileUrl, fileType: file.fileType })}
-            onDelete={(sharedFileId) => void handleDeleteSharedFile(sharedFileId)}
+          <DailyCheckPanel
+            students={dashboard.students}
+            users={dashboard.users}
+            entries={dashboard.dailyCheckEntries ?? []}
+            taskNotes={dashboard.dailyCheckTaskNotes ?? []}
+            searchQuery={dailyCheckClassSearchQuery}
+            selectedClassKey={selectedDailyCheckClassKey}
+            savingKey={savingDailyCheckKey}
+            savingTaskNoteKey={savingDailyCheckTaskNoteKey}
+            onSearchChange={setDailyCheckClassSearchQuery}
+            onSelectedClassChange={setSelectedDailyCheckClassKey}
+            onSaveEntry={(input) => void handleSaveDailyCheckEntry(input)}
+            onSaveTaskNote={(input) => void handleSaveDailyCheckTaskNote(input)}
           />
           <PrintQueuePanel
             jobs={dashboard.printJobs}
@@ -2661,7 +2757,7 @@ function LandingPortal({ onTeacher, onStudent }: { onTeacher: () => void; onStud
   return (
     <main className="app-shell portal-shell">
       <section className="portal-hero">
-        <BrandWord />
+        <CurtainBrandHero />
         <div className="portal-choice-panel">
           <p className="eyebrow">Choose Entrance</p>
           <h2>请选择进入身份</h2>
@@ -3262,6 +3358,288 @@ function TaskCompletionToggle({
         已结束
       </button>
     </div>
+  );
+}
+
+type DailyCheckClassOption = {
+  key: string;
+  teacherId: string;
+  teacherName: string;
+  className: string;
+  students: Student[];
+};
+
+function makeDailyCheckEntryKey(dateKey: string, teacherId: string, className: string, studentId: string, columnKey: string) {
+  return `${dateKey}::${teacherId}::${className}::${studentId}::${columnKey}`;
+}
+
+function makeDailyCheckTaskNoteKey(dateKey: string, teacherId: string, className: string, columnKey: string) {
+  return `${dateKey}::${teacherId}::${className}::${columnKey}`;
+}
+
+function DailyCheckPanel({
+  students,
+  users,
+  entries,
+  taskNotes,
+  searchQuery,
+  selectedClassKey,
+  savingKey,
+  savingTaskNoteKey,
+  onSearchChange,
+  onSelectedClassChange,
+  onSaveEntry,
+  onSaveTaskNote
+}: {
+  students: Student[];
+  users: User[];
+  entries: DailyCheckEntry[];
+  taskNotes: DailyCheckTaskNote[];
+  searchQuery: string;
+  selectedClassKey: string;
+  savingKey: string | null;
+  savingTaskNoteKey: string | null;
+  onSearchChange: (value: string) => void;
+  onSelectedClassChange: (value: string) => void;
+  onSaveEntry: (input: {
+    dateKey: string;
+    teacherId: string;
+    className: string;
+    studentId: string;
+    columnKey: string;
+    checked: boolean;
+    note: string;
+  }) => void;
+  onSaveTaskNote: (input: {
+    dateKey: string;
+    teacherId: string;
+    className: string;
+    columnKey: string;
+    note: string;
+  }) => void;
+}) {
+  const dateKey = getTodayDateInputValue();
+  const [draftNotes, setDraftNotes] = useState<Record<string, string>>({});
+  const [draftTaskNotes, setDraftTaskNotes] = useState<Record<string, string>>({});
+  const classOptions: DailyCheckClassOption[] = groupStudentsByTeacher(students, users)
+    .flatMap((teacher) =>
+      teacher.groups.map((group) => ({
+        key: `${teacher.teacherId}::${group.groupName}`,
+        teacherId: teacher.teacherId,
+        teacherName: teacher.teacherName,
+        className: group.groupName,
+        students: group.students
+      }))
+    )
+    .filter((option) => option.students.length > 0);
+  const normalizedSearch = searchQuery.trim().toLowerCase();
+  const visibleOptions = normalizedSearch
+    ? classOptions.filter((option) =>
+        [option.className, option.teacherName].some((value) => value.toLowerCase().includes(normalizedSearch))
+      )
+    : classOptions;
+  const activeOption = classOptions.find((option) => option.key === selectedClassKey) ?? null;
+  const activeEntries = new Map(
+    entries
+      .filter((entry) => entry.dateKey === dateKey && activeOption && entry.teacherId === activeOption.teacherId && entry.className === activeOption.className)
+      .map((entry) => [makeDailyCheckEntryKey(entry.dateKey, entry.teacherId, entry.className, entry.studentId, entry.columnKey), entry])
+  );
+  const activeTaskNotes = new Map(
+    taskNotes
+      .filter((note) => note.dateKey === dateKey && activeOption && note.teacherId === activeOption.teacherId && note.className === activeOption.className)
+      .map((note) => [makeDailyCheckTaskNoteKey(note.dateKey, note.teacherId, note.className, note.columnKey), note])
+  );
+
+  useEffect(() => {
+    setDraftNotes((current) => {
+      const next = { ...current };
+      entries.forEach((entry) => {
+        const key = makeDailyCheckEntryKey(entry.dateKey, entry.teacherId, entry.className, entry.studentId, entry.columnKey);
+        if (next[key] === undefined) next[key] = entry.note;
+      });
+      return next;
+    });
+  }, [entries]);
+
+  useEffect(() => {
+    setDraftTaskNotes((current) => {
+      const next = { ...current };
+      taskNotes.forEach((note) => {
+        const key = makeDailyCheckTaskNoteKey(note.dateKey, note.teacherId, note.className, note.columnKey);
+        if (next[key] === undefined) next[key] = note.note;
+      });
+      return next;
+    });
+  }, [taskNotes]);
+
+  function saveCell(student: Student, columnKey: string, checked: boolean, note: string) {
+    if (!activeOption) return;
+    onSaveEntry({
+      dateKey,
+      teacherId: activeOption.teacherId,
+      className: activeOption.className,
+      studentId: student.id,
+      columnKey,
+      checked,
+      note
+    });
+  }
+
+  function saveTaskNote(columnKey: string, note: string) {
+    if (!activeOption) return;
+    onSaveTaskNote({
+      dateKey,
+      teacherId: activeOption.teacherId,
+      className: activeOption.className,
+      columnKey,
+      note
+    });
+  }
+
+  return (
+    <>
+      <aside className="communication-card daily-check-panel">
+        <div className="communication-heading">
+          <div>
+            <span>按班级保存</span>
+            <strong>每日任务打卡表</strong>
+          </div>
+          <ClipboardList size={22} />
+        </div>
+
+        <label className="panel-search-box">
+          <span>搜索班级</span>
+          <input
+            value={searchQuery}
+            onChange={(event) => onSearchChange(event.target.value)}
+            placeholder="输入班级或老师"
+            aria-label="搜索每日任务打卡班级"
+          />
+        </label>
+
+        <div className="daily-check-class-list" aria-label="班级列表">
+          {visibleOptions.length ? (
+            visibleOptions.map((option) => (
+              <button
+                key={option.key}
+                type="button"
+                className={activeOption?.key === option.key ? "daily-check-class active" : "daily-check-class"}
+                onClick={() => onSelectedClassChange(option.key)}
+              >
+                <strong>{option.className}</strong>
+                <small>
+                  {option.teacherName} · {option.students.length} 个学生
+                </small>
+                <span>打开今日打卡表</span>
+              </button>
+            ))
+          ) : (
+            <p className="chat-empty">没有找到匹配班级。</p>
+          )}
+        </div>
+      </aside>
+
+      {activeOption ? (
+        <div className="modal-backdrop daily-check-modal-backdrop" role="presentation">
+          <section className="daily-check-modal" role="dialog" aria-modal="true" aria-labelledby="daily-check-modal-title">
+            <div className="form-header daily-check-modal-header">
+              <div>
+                <span>每日任务打卡表 · {dateKey}</span>
+                <h2 id="daily-check-modal-title">{activeOption.className}</h2>
+                <p>
+                  {activeOption.teacherName} · {activeOption.students.length} 个学生
+                </p>
+              </div>
+              <button className="icon-button" type="button" onClick={() => onSelectedClassChange("")} aria-label="关闭每日任务打卡表">
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="daily-check-table-scroll daily-check-modal-table-scroll">
+              <table className="daily-check-table">
+                <thead>
+                  <tr>
+                    <th>学生</th>
+                    {dailyCheckColumns.map((column) => {
+                      const key = makeDailyCheckTaskNoteKey(dateKey, activeOption.teacherId, activeOption.className, column.key);
+                      const taskNote = activeTaskNotes.get(key);
+                      const note = draftTaskNotes[key] ?? taskNote?.note ?? "";
+                      const isSaving = savingTaskNoteKey === key;
+                      return (
+                        <th key={column.key}>
+                          <div className="daily-check-task-heading">
+                            <span>{column.label}</span>
+                            <textarea
+                              value={note}
+                              disabled={isSaving}
+                              onChange={(event) => setDraftTaskNotes((current) => ({ ...current, [key]: event.target.value }))}
+                              onBlur={(event) => {
+                                if (event.target.value !== (taskNote?.note ?? "")) {
+                                  saveTaskNote(column.key, event.target.value);
+                                }
+                              }}
+                              placeholder="写今天具体任务"
+                              aria-label={`${column.label}今日具体任务`}
+                            />
+                          </div>
+                        </th>
+                      );
+                    })}
+                    <th>total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {activeOption.students.map((student) => {
+                    const completedCount = dailyCheckColumns.reduce((total, column) => {
+                      const key = makeDailyCheckEntryKey(dateKey, activeOption.teacherId, activeOption.className, student.id, column.key);
+                      return total + (activeEntries.get(key)?.checked ? 1 : 0);
+                    }, 0);
+                    return (
+                      <tr key={student.id}>
+                        <th>{student.name}</th>
+                        {dailyCheckColumns.map((column) => {
+                          const key = makeDailyCheckEntryKey(dateKey, activeOption.teacherId, activeOption.className, student.id, column.key);
+                          const entry = activeEntries.get(key);
+                          const note = draftNotes[key] ?? entry?.note ?? "";
+                          const isSaving = savingKey === key;
+                          return (
+                            <td key={column.key} className={entry?.checked ? "checked" : undefined}>
+                              <label className="daily-check-cell-check">
+                                <input
+                                  type="checkbox"
+                                  checked={Boolean(entry?.checked)}
+                                  disabled={isSaving}
+                                  onChange={(event) => saveCell(student, column.key, event.target.checked, note)}
+                                />
+                                <span>{entry?.checked ? "完成" : "未打卡"}</span>
+                              </label>
+                              <textarea
+                                value={note}
+                                disabled={isSaving}
+                                onChange={(event) => setDraftNotes((current) => ({ ...current, [key]: event.target.value }))}
+                                onBlur={(event) => {
+                                  if (event.target.value !== (entry?.note ?? "")) {
+                                    saveCell(student, column.key, Boolean(entry?.checked), event.target.value);
+                                  }
+                                }}
+                                placeholder="备注"
+                              />
+                            </td>
+                          );
+                        })}
+                        <td className="daily-check-total">
+                          {completedCount}/{dailyCheckColumns.length}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      ) : null}
+    </>
   );
 }
 

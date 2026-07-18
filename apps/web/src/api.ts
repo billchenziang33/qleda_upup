@@ -3,6 +3,8 @@ import type {
   CreateTaskInput,
   DashboardData,
   DashboardVersion,
+  DailyCheckEntry,
+  DailyCheckTaskNote,
   ParentExport,
   PrintJob,
   SharedFile,
@@ -333,6 +335,34 @@ export function createSharedFile(input: {
   return request<SharedFile>("/api/shared-files", {
     method: "POST",
     body: formData
+  });
+}
+
+export function updateDailyCheckEntry(input: {
+  dateKey: string;
+  teacherId: string;
+  className: string;
+  studentId: string;
+  columnKey: string;
+  checked: boolean;
+  note: string;
+}) {
+  return request<DailyCheckEntry>("/api/daily-check-entries", {
+    method: "PATCH",
+    body: JSON.stringify(input)
+  });
+}
+
+export function updateDailyCheckTaskNote(input: {
+  dateKey: string;
+  teacherId: string;
+  className: string;
+  columnKey: string;
+  note: string;
+}) {
+  return request<DailyCheckTaskNote>("/api/daily-check-task-notes", {
+    method: "PATCH",
+    body: JSON.stringify(input)
   });
 }
 
