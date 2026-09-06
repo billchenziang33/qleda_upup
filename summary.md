@@ -440,6 +440,13 @@ curl.exe -L -o NUL -w "%{http_code} %{size_download}\n" https://qleda-upup-d0g5f
 - Deployed frontend-only to the existing CloudBase Hosting root with assets `assets/index-TlVolVPm.js` and `assets/index-2YHN3mk9.css`; no backend, database, or task data was modified.
 - Post-deploy verification: Hosting root, `/health`, `/api/dashboard/version`, and `/api/dashboard` returned HTTP 200. Browser verification opened `/?personal=1&view=test-schedule`, opened the first `Add subtask` editor, confirmed the compact row dimensions, and reported no console errors.
 
+## 2026-09-06 Dashboard Version-Check Failure Guard
+
+- Updated `apps/web/src/App.tsx` so a transient `/api/dashboard/version` failure no longer immediately triggers a full `/api/dashboard` reload when an existing dashboard is already visible.
+- Initial dashboard loading and explicit mutation refreshes keep their existing retry and reload behavior. The next scheduled or focus-triggered version check retries normally.
+- This reduces the chance that a temporary 500/503 multiplies into a full multi-table read without changing the UI, database schema, or normal user workflows.
+- Verification passed: `npm.cmd run typecheck` and `npm.cmd run build`. The existing large Three.js chunk warning remains unchanged.
+
 1. Read this `summary.md`.
 2. Inspect relevant source before editing.
 3. Keep changes minimal and scoped.

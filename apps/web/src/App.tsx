@@ -743,7 +743,11 @@ function App() {
           await loadDashboard({ silent: true });
         }
       } catch {
-        await loadDashboard({ silent: true });
+        // A transient version-check failure should not fan out into a full dashboard read.
+        // The next scheduled/focus check will retry while the current view remains usable.
+        if (!dashboardRef.current) {
+          await loadDashboard({ silent: true });
+        }
       }
     };
 
