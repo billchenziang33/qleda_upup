@@ -453,7 +453,9 @@ curl.exe -L -o NUL -w "%{http_code} %{size_download}\n" https://qleda-upup-d0g5f
 - Added a frontend guard in `apps/web/src/App.tsx` so transient dashboard-version failures do not trigger a full dashboard reload when the current dashboard is already visible. Explicit mutation refreshes and initial-load retries remain unchanged.
 - Added a 15-second backend response cache for `/api/dashboard` in `apps/api/src/server.ts`; normal write operations invalidate it through `touchDashboardVersion`.
 - Added idempotent MySQL index migrations in `apps/api/src/db.ts` for task status/due date, task-file task/role/type, and audit-log entity lookups. No data or UI changes are performed by these migrations.
-- Verification so far: API and web typechecks/builds passed; focused API/web regression tests passed (6 tests). The index migration and cache are committed locally but still require the next deployment verification.
+- Verification so far: API and web typechecks/builds passed; focused API/web regression tests passed (6 tests).
+- Deployed backend as `qleda-api-094` with 100% traffic and unchanged 1 CPU/2 GB, 0–5 instance, port 4000, access, and MySQL configuration.
+- Post-deploy verification: `/health`, `/api/dashboard/version`, and `/api/dashboard` returned HTTP 200; the full Dashboard response took about 0.9 seconds. The three new MySQL indexes were confirmed present through `information_schema.STATISTICS`.
 
 1. Read this `summary.md`.
 2. Inspect relevant source before editing.
