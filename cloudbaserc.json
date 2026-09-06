@@ -1,0 +1,6 @@
+{
+  "envId": "qleda-upup-d0g5fyz6hd39722f9",
+  "cloudrun": {
+    "name": "qleda-api"
+  }
+}
