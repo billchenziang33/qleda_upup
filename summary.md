@@ -447,6 +447,14 @@ curl.exe -L -o NUL -w "%{http_code} %{size_download}\n" https://qleda-upup-d0g5f
 - This reduces the chance that a temporary 500/503 multiplies into a full multi-table read without changing the UI, database schema, or normal user workflows.
 - Verification passed: `npm.cmd run typecheck` and `npm.cmd run build`. The existing large Three.js chunk warning remains unchanged.
 
+## 2026-09-06 Resource Optimization In Progress
+
+- Created and pushed backup branch `backup-before-resource-optimization-20260906` at commit `069becc` before optimization work.
+- Added a frontend guard in `apps/web/src/App.tsx` so transient dashboard-version failures do not trigger a full dashboard reload when the current dashboard is already visible. Explicit mutation refreshes and initial-load retries remain unchanged.
+- Added a 15-second backend response cache for `/api/dashboard` in `apps/api/src/server.ts`; normal write operations invalidate it through `touchDashboardVersion`.
+- Added idempotent MySQL index migrations in `apps/api/src/db.ts` for task status/due date, task-file task/role/type, and audit-log entity lookups. No data or UI changes are performed by these migrations.
+- Verification so far: API and web typechecks/builds passed; focused API/web regression tests passed (6 tests). The index migration and cache are committed locally but still require the next deployment verification.
+
 1. Read this `summary.md`.
 2. Inspect relevant source before editing.
 3. Keep changes minimal and scoped.

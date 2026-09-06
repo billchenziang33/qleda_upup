@@ -423,6 +423,18 @@ async function ensureMysqlColumn(pool: Pool, table: string, column: string, defi
   }
 }
 
+async function ensureMysqlIndex(pool: Pool, table: string, indexName: string, columns: string) {
+  const [rows] = await pool.execute<RowDataPacket[]>(
+    `SELECT COUNT(*) AS count
+     FROM information_schema.STATISTICS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?`,
+    [table, indexName]
+  );
+  if (Number(rows[0]?.count ?? 0) === 0) {
+    await pool.execute(`ALTER TABLE ${table} ADD INDEX ${indexName} (${columns})`);
+  }
+}
+
 async function mysqlMigrations(pool: Pool) {
   await ensureMysqlColumn(pool, "task_files", "fileData", "LONGTEXT");
   await ensureMysqlColumn(pool, "task_files", "fileSize", "BIGINT");
@@ -430,6 +442,9 @@ async function mysqlMigrations(pool: Pool) {
   await ensureMysqlColumn(pool, "shared_files", "fileSize", "BIGINT");
   await ensureMysqlColumn(pool, "personal_tasks", "isPriority", "TINYINT NOT NULL DEFAULT 0");
   await ensureMysqlColumn(pool, "personal_tasks", "category", "VARCHAR(30) NULL");
+  await ensureMysqlIndex(pool, "tasks", "idx_tasks_status_due", "status, dueDate");
+  await ensureMysqlIndex(pool, "task_files", "idx_task_files_task_role_type", "taskId, uploaderRole, fileType");
+  await ensureMysqlIndex(pool, "audit_logs", "idx_audit_logs_entity", "entityType, entityId");
 }
 
 async function seedIfEmpty(query: (sql: string, params?: RowValue[]) => Promise<unknown[]>, exec: (sql: string, params?: RowValue[]) => Promise<void>) {
