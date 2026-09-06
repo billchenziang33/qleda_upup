@@ -162,8 +162,10 @@ const exportDirectory = fileURLToPath(new URL("../data/exports", import.meta.url
 const oldCompletedTaskRetentionDays = 2;
 const oldCompletedTaskCleanupIntervalMs = 12 * 60 * 60 * 1000;
 const personalWorkspaceOwnerId = "personal_workspace_owner_v1";
+const dashboardResponseCacheTtlMs = 15 * 1000;
 let oldCompletedTaskCleanupAt = 0;
 let oldCompletedTaskCleanupPromise: Promise<void> | null = null;
+let dashboardResponseCache: { expiresAt: number; payload: unknown } | null = null;
 
 const allowedOrigins = (process.env.WEB_ORIGIN ?? "http://localhost:5173")
   .split(",")
@@ -450,6 +452,7 @@ async function ensureTeacherUser(name: string) {
 }
 
 async function touchDashboardVersion(timestamp = now()) {
+  dashboardResponseCache = null;
   const marker = `${timestamp}:${createId("dv")}`;
   if (databaseType() === "mysql") {
     await run(
@@ -1592,6 +1595,10 @@ app.get("/api/dashboard", async (_req, res, next) => {
   try {
     await cleanupOldCompletedTasks();
     await markTasksWithTaskEvidenceCompleted();
+    if (dashboardResponseCache && dashboardResponseCache.expiresAt > Date.now()) {
+      res.json(dashboardResponseCache.payload);
+      return;
+    }
     const todayDateKey = getShanghaiDateKey();
     const [users, students, tasks, parentExports, printJobs, auditLogs, chatMessages, sharedFiles, dailyCheckEntries, dailyCheckTaskNotes, version] = await Promise.all([
       all("SELECT * FROM users WHERE role <> 'archived_teacher' ORDER BY createdAt ASC"),
@@ -1635,7 +1642,7 @@ app.get("/api/dashboard", async (_req, res, next) => {
     const tasksWithCorrection = new Set(correctedTaskRows.map((row) => row.taskId));
     const pendingReviewTasks = visibleTasks.filter((task) => task.status !== "completed" && !tasksWithCorrection.has(task.id));
 
-    res.json({
+    const payload = {
       users,
       students,
       tasks: sortTasksForTeacher(visibleTasks.map(mapTask)),
@@ -1656,7 +1663,12 @@ app.get("/api/dashboard", async (_req, res, next) => {
         pendingReview: pendingReviewTasks.length,
         pendingPrintJobs: printJobs.filter((job) => job.status === "pending").length
       }
-    });
+    };
+    dashboardResponseCache = {
+      expiresAt: Date.now() + dashboardResponseCacheTtlMs,
+      payload
+    };
+    res.json(payload);
   } catch (error) {
     next(error);
   }
