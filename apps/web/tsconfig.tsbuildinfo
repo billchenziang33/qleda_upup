@@ -1,1 +1,1 @@
-{"root":["./src/app.tsx","./src/api.ts","./src/main.tsx","./src/types.ts","./src/vite-env.d.ts"],"version":"5.9.3"}
+{"root":["./src/app.tsx","./src/curtainbrandhero.tsx","./src/ieltsbackgroundscene.tsx","./src/personalcalendarplanner.tsx","./src/personaltaskeditor.tsx","./src/personalworkspacepage.tsx","./src/prioritytodopanel.tsx","./src/testschedulepage.tsx","./src/api.ts","./src/main.tsx","./src/personaltasks.ts","./src/testsubtasks.ts","./src/types.ts","./src/vite-env.d.ts"],"version":"5.9.3"}

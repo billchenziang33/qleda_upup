@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type PointerEvent } from "react";
 import type { Line, LineBasicMaterial } from "three";
 
 function createCurtainTexture() {
@@ -89,9 +89,11 @@ function createCurtainTexture() {
   return canvas;
 }
 
-export function CurtainBrandHero({ className = "" }: { className?: string }) {
+export function CurtainBrandHero({ className = "", onSecretLongPress }: { className?: string; onSecretLongPress?: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const windActiveRef = useRef(false);
+  const secretLongPressTimerRef = useRef<number | null>(null);
+  const secretLongPressTriggeredRef = useRef(false);
   const [windActive, setWindActive] = useState(false);
 
   useEffect(() => {
@@ -407,6 +409,37 @@ export function CurtainBrandHero({ className = "" }: { className?: string }) {
     setWindActive(pressed);
   }
 
+  function clearSecretLongPress() {
+    if (secretLongPressTimerRef.current !== null) {
+      window.clearTimeout(secretLongPressTimerRef.current);
+      secretLongPressTimerRef.current = null;
+    }
+  }
+
+  function handleFanPointerDown(event: PointerEvent<HTMLButtonElement>) {
+    event.currentTarget.setPointerCapture(event.pointerId);
+    secretLongPressTriggeredRef.current = false;
+    clearSecretLongPress();
+    setFanPressed(true);
+    secretLongPressTimerRef.current = window.setTimeout(() => {
+      secretLongPressTimerRef.current = null;
+      if (secretLongPressTriggeredRef.current) return;
+      secretLongPressTriggeredRef.current = true;
+      navigator.vibrate?.(12);
+      onSecretLongPress?.();
+        }, 2000);
+  }
+
+  function handleFanPointerEnd(event?: PointerEvent<HTMLButtonElement>) {
+    clearSecretLongPress();
+    if (event?.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setFanPressed(false);
+  }
+
+  useEffect(() => () => clearSecretLongPress(), []);
+
   const rootClassName = ["curtain-brand-hero", className, windActive ? "wind-active" : ""].filter(Boolean).join(" ");
 
   return (
@@ -415,16 +448,10 @@ export function CurtainBrandHero({ className = "" }: { className?: string }) {
       <button
         type="button"
         className="fan-wind-button"
-        onPointerDown={(event) => {
-          event.currentTarget.setPointerCapture(event.pointerId);
-          setFanPressed(true);
-        }}
-        onPointerUp={(event) => {
-          event.currentTarget.releasePointerCapture(event.pointerId);
-          setFanPressed(false);
-        }}
-        onPointerCancel={() => setFanPressed(false)}
-        onPointerLeave={() => setFanPressed(false)}
+        onPointerDown={handleFanPointerDown}
+        onPointerUp={handleFanPointerEnd}
+        onPointerCancel={() => handleFanPointerEnd()}
+        onPointerLeave={() => handleFanPointerEnd()}
         aria-label="长按小风扇给 QULEDA 幕布吹风"
       >
         <span>长按一下 夏日清凉</span>

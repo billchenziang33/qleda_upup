@@ -13,6 +13,7 @@ import type {
   TaskFile,
   TaskStatus
 } from "./types";
+import type { PersonalTask, PersonalTaskDraft, PersonalTestSubtask } from "./personalTasks";
 
 const cloudBaseRunApiUrl = "https://qleda-api-263206-10-1437709388.sh.run.tcloudbase.com";
 
@@ -54,6 +55,43 @@ export function getDashboardVersion() {
   return request<DashboardVersion>("/api/dashboard/version");
 }
 
+export function getPersonalTasks(month?: string, scope: "calendar" | "priority" = "calendar") {
+  const query = new URLSearchParams({ scope });
+  if (month) query.set("month", month);
+  return request<PersonalTask[]>(`/api/personal-tasks?${query.toString()}`);
+}
+
+export function createPersonalTask(input: PersonalTaskDraft) {
+  return request<PersonalTask>("/api/personal-tasks", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function updatePersonalTask(taskId: string, input: Partial<PersonalTaskDraft> & { completed?: boolean }) {
+  return request<PersonalTask>(`/api/personal-tasks/${taskId}`, { method: "PATCH", body: JSON.stringify(input) });
+}
+
+export async function deletePersonalTask(taskId: string) {
+  const response = await fetch(`${apiBaseUrl}/api/personal-tasks/${taskId}`, { method: "DELETE" });
+  if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+}
+
+export function getPersonalTestSubtasks(testTaskId: string) {
+  const query = new URLSearchParams({ testTaskId });
+  return request<PersonalTestSubtask[]>(`/api/personal-test-subtasks?${query.toString()}`);
+}
+
+export function createPersonalTestSubtask(input: { testTaskId: string; title: string }) {
+  return request<PersonalTestSubtask>("/api/personal-test-subtasks", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function updatePersonalTestSubtask(subtaskId: string, input: { title?: string; completed?: boolean }) {
+  return request<PersonalTestSubtask>(`/api/personal-test-subtasks/${subtaskId}`, { method: "PATCH", body: JSON.stringify(input) });
+}
+
+export async function deletePersonalTestSubtask(subtaskId: string) {
+  const response = await fetch(`${apiBaseUrl}/api/personal-test-subtasks/${subtaskId}`, { method: "DELETE" });
+  if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+}
+
 export function getTaskFiles(taskId: string) {
   return request<TaskFile[]>(`/api/tasks/${taskId}/files`);
 }
@@ -83,6 +121,12 @@ export function updateTeacherName(teacherId: string, input: { name: string }) {
   return request<{ id: string; name: string }>(`/api/teachers/${teacherId}`, {
     method: "PATCH",
     body: JSON.stringify(input)
+  });
+}
+
+export function archiveTeacher(teacherId: string) {
+  return request<void>(`/api/teachers/${teacherId}`, {
+    method: "DELETE"
   });
 }
 

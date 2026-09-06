@@ -23,6 +23,7 @@ import {
   X
 } from "lucide-react";
 import {
+  archiveTeacher,
   createPrintJob,
   createSharedFile,
   createStudent,
@@ -50,6 +51,7 @@ import {
   uploadTaskFile
 } from "./api";
 import { CurtainBrandHero } from "./CurtainBrandHero";
+import { PersonalWorkspacePage } from "./PersonalWorkspacePage";
 import type {
   CreateStudentInput,
   CreateTaskInput,
@@ -63,6 +65,10 @@ import type {
   TaskStatus,
   User
 } from "./types";
+
+function isPersonalWorkspaceRoute() {
+  return new URLSearchParams(window.location.search).get("personal") === "1";
+}
 
 const statusLabels: Record<TaskStatus, string> = {
   not_started: "未开始",
@@ -84,7 +90,7 @@ const emptyStudentForm: CreateStudentInput = {
   teacherName: ""
 };
 
-const dashboardSyncIntervalMs = 180000;
+const dashboardSyncIntervalMs = 900000;
 const dashboardIdlePauseMs = 5 * 60 * 1000;
 const dashboardInitialRetryDelaysMs = [0, 1500, 3000, 6000, 10000];
 const teacherGuideStorageKey = "qleda-teacher-guide-seen-v2";
@@ -697,6 +703,7 @@ function App() {
   }
 
   useEffect(() => {
+    if (isPersonalWorkspaceRoute()) return;
     void loadDashboard();
   }, []);
 
@@ -715,6 +722,7 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (isPersonalWorkspaceRoute()) return;
     const syncDashboard = async (options: { forceVersionCheck?: boolean; markActive?: boolean } = {}) => {
       if (options.markActive) {
         lastActivityAtRef.current = Date.now();
@@ -915,13 +923,20 @@ function App() {
       tasks: nextTasks,
       summary: {
         ...currentDashboard.summary,
-        activeTasks: countTasksWithinDays(nextTasks, 3),
+        activeTasks: countTasksWithinDays(nextTasks, 2),
         pendingReview: nextTasks.filter((task) => task.status !== "completed" && !correctedTaskIds.has(task.id)).length
       }
     };
 
     dashboardRef.current = nextDashboard;
     setDashboard(nextDashboard);
+  }
+
+  function handleTaskSaved(updatedTask: Task) {
+    mergeTaskIntoDashboard(updatedTask);
+    window.setTimeout(() => {
+      void loadDashboard({ silent: true });
+    }, 1200);
   }
 
   async function handleCreateTeacher(event: FormEvent<HTMLFormElement>) {
@@ -1545,31 +1560,38 @@ function App() {
     });
   }
 
-  function handleHideTeacher(teacherId: string, teacherName: string) {
+  async function handleHideTeacher(teacherId: string, teacherName: string) {
     const teacherStudents = dashboardRef.current?.students.filter((student) => student.teacherId === teacherId) ?? [];
-    if (!window.confirm(`确认从当前前端隐藏「${teacherName}」老师以及其下 ${teacherStudents.length} 个学生吗？数据库数据会保留。`)) return;
+    if (!window.confirm(`确认隐藏「${teacherName}」老师以及其下 ${teacherStudents.length} 个学生吗？学生和任务数据会保留，其他老师端也会同步隐藏。`)) return;
 
-    const nextHiddenTeacherIds = new Set(hiddenTeacherIds).add(teacherId);
-    setHiddenTeacherIds(nextHiddenTeacherIds);
-    writeHiddenTeacherIds(nextHiddenTeacherIds);
-    setExpandedTeachers((current) => {
-      const next = new Set(current);
-      next.delete(teacherId);
-      return next;
-    });
-    setExpandedStudentGroups((current) => {
-      const next = new Set(current);
-      Array.from(next).forEach((key) => {
-        if (key.startsWith(`${teacherId}::`)) next.delete(key);
+    try {
+      await archiveTeacher(teacherId);
+      const nextHiddenTeacherIds = new Set(hiddenTeacherIds).add(teacherId);
+      setHiddenTeacherIds(nextHiddenTeacherIds);
+      writeHiddenTeacherIds(nextHiddenTeacherIds);
+      setExpandedTeachers((current) => {
+        const next = new Set(current);
+        next.delete(teacherId);
+        return next;
       });
-      return next;
-    });
+      setExpandedStudentGroups((current) => {
+        const next = new Set(current);
+        Array.from(next).forEach((key) => {
+          if (key.startsWith(`${teacherId}::`)) next.delete(key);
+        });
+        return next;
+      });
 
-    const selectedStudent = dashboardRef.current?.students.find((student) => student.id === selectedStudentId);
-    if (selectedStudent?.teacherId === teacherId || selectedTeacherGroup?.teacherId === teacherId) {
-      clearSelectedStudent();
+      const selectedStudent = dashboardRef.current?.students.find((student) => student.id === selectedStudentId);
+      if (selectedStudent?.teacherId === teacherId || selectedTeacherGroup?.teacherId === teacherId) {
+        clearSelectedStudent();
+      }
+      showToast(`${teacherName} 已隐藏，学生和任务数据仍然保留。`);
+      void loadDashboard({ silent: true });
+    } catch (error) {
+      console.error(error);
+      showToast("隐藏老师失败，请稍后重试。");
     }
-    showToast(`${teacherName} 已从当前前端隐藏，后端数据仍然保留。`);
   }
 
   function openTeacherDailyFeedbackForm() {
@@ -1693,6 +1715,10 @@ function App() {
     setCorrectionFiles((current) => current.filter((_, itemIndex) => itemIndex !== index));
   }
 
+  if (isPersonalWorkspaceRoute()) {
+    return <PersonalWorkspacePage onExit={() => window.location.assign("/")} />;
+  }
+
   if (!dashboard) {
     return (
       <main className="boot-screen">
@@ -1774,6 +1800,9 @@ function App() {
   const teacherGroups = groupStudentsByTeacher(dashboard.students, dashboard.users).filter(
     (teacher) => !hiddenTeacherIds.has(teacher.teacherId)
   );
+  const visibleTeacherIdSet = new Set(teacherGroups.map((teacher) => teacher.teacherId));
+  const dailyCheckStudents = dashboard.students.filter((student) => visibleTeacherIdSet.has(student.teacherId));
+  const dailyCheckUsers = dashboard.users.filter((user) => user.role !== "teacher" || visibleTeacherIdSet.has(user.id));
   const isTeacherFocusChecklistComplete = teacherFocusCheckedItems.every(Boolean);
   const normalizedStudentSearch = studentSearchQuery.trim().toLowerCase();
   const filteredTeacherGroups = normalizedStudentSearch
@@ -1813,7 +1842,7 @@ function App() {
       <section className="top-dashboard">
         <div className="top-dashboard-main">
           <section className="hero-card">
-            <CurtainBrandHero className="teacher-dashboard-curtain" />
+            <CurtainBrandHero className="teacher-dashboard-curtain" onSecretLongPress={() => window.location.assign("/?personal=1")} />
             <div className="hero-panel teacher-hero-panel">
               <Sparkles size={28} />
               <strong>今日重点</strong>
@@ -1829,9 +1858,9 @@ function App() {
             <Metric icon={<GraduationCap />} label="学生数量" value={dashboard.summary.studentCount} />
             <Metric
               icon={<ClipboardList />}
-              label="3天内总任务"
+              label="2天内总任务"
               value={dashboard.summary.activeTasks}
-              helper="查看3天内全部学生任务"
+              helper="查看2天内全部学生任务"
               onClick={() => {
                 setSelectedStudentId("all");
                 setSelectedTeacherGroup(null);
@@ -1852,8 +1881,8 @@ function App() {
         </div>
         <div className="top-dashboard-side">
           <DailyCheckPanel
-            students={dashboard.students}
-            users={dashboard.users}
+            students={dailyCheckStudents}
+            users={dailyCheckUsers}
             entries={dashboard.dailyCheckEntries ?? []}
             taskNotes={dashboard.dailyCheckTaskNotes ?? []}
             searchQuery={dailyCheckClassSearchQuery}
@@ -1939,7 +1968,7 @@ function App() {
                       toggleTeacher(teacherId);
                     }}
                     onRename={(nextTeacherName) => void handleRenameTeacher(teacherId, nextTeacherName)}
-                    onDelete={() => handleHideTeacher(teacherId, teacherName)}
+                    onDelete={() => void handleHideTeacher(teacherId, teacherName)}
                     dropActive={dragTargetKey === `teacher:${teacherId}`}
                     onDragOver={(event) => handleStudentArchiveDragOver(event, `teacher:${teacherId}`)}
                     onDragLeave={(event) => handleStudentArchiveDragLeave(event, `teacher:${teacherId}`)}
@@ -2132,7 +2161,7 @@ function App() {
                   />
                   <div className="task-card-body">
                     <div className="task-main">
-                      <TaskTitleEditor task={task} onSave={mergeTaskIntoDashboard} />
+                      <TaskTitleEditor task={task} onSave={handleTaskSaved} />
                       <div className="task-meta">
                         {taskStudent && <span>学生 {taskStudent.name}</span>}
                         <span>DDL {formatTaskDueDate(task.dueDate)}</span>
@@ -2155,7 +2184,7 @@ function App() {
                         onDeleteFile={(fileId) => void handleDeleteFile(fileId)}
                         onPreview={setPreviewFile}
                       />
-                      <TeacherNoteEditor task={task} onSave={mergeTaskIntoDashboard} />
+                      <TeacherNoteEditor task={task} onSave={handleTaskSaved} />
                     </div>
                   </div>
 
@@ -2757,7 +2786,7 @@ function LandingPortal({ onTeacher, onStudent }: { onTeacher: () => void; onStud
   return (
     <main className="app-shell portal-shell">
       <section className="portal-hero">
-        <CurtainBrandHero />
+        <CurtainBrandHero onSecretLongPress={() => window.location.assign("/?personal=1")} />
         <div className="portal-choice-panel">
           <p className="eyebrow">Choose Entrance</p>
           <h2>请选择进入身份</h2>
@@ -3268,49 +3297,64 @@ function GuidePreviewModal({ onClose }: { onClose: () => void }) {
 
         <section className="guide-preview-hero">
           <strong>最快上手路径</strong>
-          <span>添加学生档案 → 新建任务 → 上传批改 / 标记结束 / 管理打印</span>
+          <span>添加学生档案 → 新建任务 → 每日打卡 → 上传批改 / 写备注 → 导出反馈</span>
         </section>
 
         <div className="guide-preview-grid">
           <article>
             <b>1. 建立学生档案</b>
-            <p>在左侧点击“添加老师”或“添加学生”。学生会归到对应老师和班级下。</p>
-            <p>学生多的时候，可以用“搜索学生”直接按姓名定位。</p>
+            <p>在左侧点击“添加学生”，填写学生姓名、所属老师或学期、班级分组。</p>
+            <p>老师、班级和学生都可以搜索；学生或班级支持拖拽移动到其他老师/班级。</p>
           </article>
           <article>
             <b>2. 创建任务</b>
-            <p>选择学生后，点击右侧“新建任务”，填写任务名称和说明。</p>
-            <p>任务会进入任务队列，每张卡片都会显示对应学生姓名。</p>
+            <p>选择单个学生，或点击班级后创建班级任务。任务会进入任务队列。</p>
+            <p>每张任务卡右上角都有“未开始 / 已结束”，也可以用小齿轮修改任务名称。</p>
           </article>
           <article>
-            <b>3. 上传批改或打印</b>
-            <p>在任务卡片点击“上传批改”，上传批改图片或文件并填写备注。</p>
-            <p>需要打印的资料可以加入打印队列，并在右侧更新打印状态。</p>
+            <b>3. 每日任务打卡表</b>
+            <p>右侧“每日任务打卡表”按班级保存，每天自动对应当天日期。</p>
+            <p>先在表头写今天具体任务，再给学生勾选完成状态或填写备注。</p>
+          </article>
+          <article>
+            <b>4. 任务与打卡联动</b>
+            <p>如果任务名称等于打卡表列名，或等于表头的今日任务备注，就会自动关联。</p>
+            <p>关联后只同步两项：完成状态和备注；不会改变其他任务内容。</p>
           </article>
           <article>
             <b>待批改列表</b>
             <p>点击顶部“待批改”，会显示全部还没有上传批改图片的任务。</p>
-            <p>如果任务无需批改，可在卡片右上角切换为“已结束”，它就不会继续出现在待批改列表。</p>
+            <p>上传批改照片、上传学生作业/答案，或填写老师备注后，任务会自动进入已结束。</p>
           </article>
           <article>
-            <b>常用文件框</b>
-            <p>右侧“常用文件框”可以保存讲义、模板和打印材料。</p>
-            <p>保存后老师和助教都能预览、下载或复用。</p>
+            <b>老师备注</b>
+            <p>老师备注会在停止输入 3 秒后自动保存，不需要每输入一个字就刷新。</p>
+            <p>有老师备注的任务会被视为已结束；清空备注并取消完成后可回到未开始。</p>
           </article>
           <article>
-            <b>隐藏但常用的操作</b>
-            <p>小齿轮可以修改老师、班级、学生或任务名称。</p>
-            <p>拖动学生可以移动到其他班级；拖动班级可以移动到其他老师。</p>
+            <b>作业与批改上传</b>
+            <p>任务卡底部有参考答案、上传作业、上传批改、导出给家长四个常用按钮。</p>
+            <p>批改照片会在上传前压缩，减少资源点消耗，同时保留可读性。</p>
           </article>
           <article>
-            <b>移动后的反馈</b>
-            <p>移动成功后页面会自动刷新，并在底部出现成功提示。</p>
-            <p>如果失败，会显示更明确的失败原因。</p>
+            <b>学生当日反馈 PDF</b>
+            <p>选择学生和日期后，可以导出该学生当日全部作业反馈 PDF。</p>
+            <p>文件名格式为“学生姓名-日期-当日全部作业反馈”，适合直接发给家长。</p>
+          </article>
+          <article>
+            <b>打印与历史数据</b>
+            <p>打印管理用于下载和更新打印状态；顶部待批改卡片用于确认当天批改完成。</p>
+            <p>较旧任务会按当前归档规则保存到本地后再从线上清理，减少数据库资源消耗。</p>
+          </article>
+          <article>
+            <b>操作记录</b>
+            <p>底部操作记录会显示最近后台动作，部分动作支持撤回。</p>
+            <p>遇到误操作时，先查看操作记录，再决定是否撤回或手动修正。</p>
           </article>
         </div>
 
         <div className="guide-preview-footer">
-          <span>建议顺序：添加学生 → 新建任务 → 上传批改 → 打印 / 导出反馈。</span>
+          <span>建议顺序：添加学生 → 新建任务 → 填每日打卡 → 上传批改 / 写备注 → 导出反馈。</span>
           <button type="button" className="submit-button" onClick={onClose}>
             我知道了
           </button>
@@ -3421,6 +3465,8 @@ function DailyCheckPanel({
   const dateKey = getTodayDateInputValue();
   const [draftNotes, setDraftNotes] = useState<Record<string, string>>({});
   const [draftTaskNotes, setDraftTaskNotes] = useState<Record<string, string>>({});
+  const lastEntryNotesRef = useRef<Record<string, string>>({});
+  const lastTaskNotesRef = useRef<Record<string, string>>({});
   const classOptions: DailyCheckClassOption[] = groupStudentsByTeacher(students, users)
     .flatMap((teacher) =>
       teacher.groups.map((group) => ({
@@ -3439,38 +3485,67 @@ function DailyCheckPanel({
       )
     : classOptions;
   const activeOption = classOptions.find((option) => option.key === selectedClassKey) ?? null;
-  const activeEntries = new Map(
+  const activeEntries = new Map<string, DailyCheckEntry>(
     entries
-      .filter((entry) => entry.dateKey === dateKey && activeOption && entry.teacherId === activeOption.teacherId && entry.className === activeOption.className)
-      .map((entry) => [makeDailyCheckEntryKey(entry.dateKey, entry.teacherId, entry.className, entry.studentId, entry.columnKey), entry])
+      .filter(
+        (entry) =>
+          entry.dateKey === dateKey &&
+          activeOption &&
+          entry.teacherId === activeOption.teacherId &&
+          activeOption.students.some((student) => student.id === entry.studentId) &&
+          (entry.className === activeOption.teacherName || entry.className === activeOption.className)
+      )
+      .sort((left, right) => Number(left.className === activeOption?.className) - Number(right.className === activeOption?.className))
+      .map((entry) => [makeDailyCheckEntryKey(entry.dateKey, entry.teacherId, activeOption!.className, entry.studentId, entry.columnKey), entry])
   );
-  const activeTaskNotes = new Map(
+  const activeTaskNotes = new Map<string, DailyCheckTaskNote>(
     taskNotes
-      .filter((note) => note.dateKey === dateKey && activeOption && note.teacherId === activeOption.teacherId && note.className === activeOption.className)
-      .map((note) => [makeDailyCheckTaskNoteKey(note.dateKey, note.teacherId, note.className, note.columnKey), note])
+      .filter(
+        (note) =>
+          note.dateKey === dateKey &&
+          activeOption &&
+          note.teacherId === activeOption.teacherId &&
+          (note.className === activeOption.teacherName || note.className === activeOption.className)
+      )
+      .sort((left, right) => Number(left.className === activeOption?.className) - Number(right.className === activeOption?.className))
+      .map((note) => [makeDailyCheckTaskNoteKey(note.dateKey, note.teacherId, activeOption!.className, note.columnKey), note])
   );
 
   useEffect(() => {
     setDraftNotes((current) => {
       const next = { ...current };
+      const previousServerNotes = lastEntryNotesRef.current;
+      const nextServerNotes: Record<string, string> = {};
       entries.forEach((entry) => {
         const key = makeDailyCheckEntryKey(entry.dateKey, entry.teacherId, entry.className, entry.studentId, entry.columnKey);
-        if (next[key] === undefined) next[key] = entry.note;
+        nextServerNotes[key] = entry.note;
+        if (savingKey === key) return;
+        if (next[key] === undefined || next[key] === previousServerNotes[key]) {
+          next[key] = entry.note;
+        }
       });
+      lastEntryNotesRef.current = nextServerNotes;
       return next;
     });
-  }, [entries]);
+  }, [entries, savingKey]);
 
   useEffect(() => {
     setDraftTaskNotes((current) => {
       const next = { ...current };
+      const previousServerNotes = lastTaskNotesRef.current;
+      const nextServerNotes: Record<string, string> = {};
       taskNotes.forEach((note) => {
         const key = makeDailyCheckTaskNoteKey(note.dateKey, note.teacherId, note.className, note.columnKey);
-        if (next[key] === undefined) next[key] = note.note;
+        nextServerNotes[key] = note.note;
+        if (savingTaskNoteKey === key) return;
+        if (next[key] === undefined || next[key] === previousServerNotes[key]) {
+          next[key] = note.note;
+        }
       });
+      lastTaskNotesRef.current = nextServerNotes;
       return next;
     });
-  }, [taskNotes]);
+  }, [taskNotes, savingTaskNoteKey]);
 
   function saveCell(student: Student, columnKey: string, checked: boolean, note: string) {
     if (!activeOption) return;
@@ -3527,9 +3602,7 @@ function DailyCheckPanel({
                 onClick={() => onSelectedClassChange(option.key)}
               >
                 <strong>{option.className}</strong>
-                <small>
-                  {option.teacherName} · {option.students.length} 个学生
-                </small>
+                <small>{option.teacherName} · {option.students.length} 个学生</small>
                 <span>打开今日打卡表</span>
               </button>
             ))
@@ -3546,9 +3619,7 @@ function DailyCheckPanel({
               <div>
                 <span>每日任务打卡表 · {dateKey}</span>
                 <h2 id="daily-check-modal-title">{activeOption.className}</h2>
-                <p>
-                  {activeOption.teacherName} · {activeOption.students.length} 个学生
-                </p>
+                <p>{activeOption.teacherName} · {activeOption.students.length} 个学生</p>
               </div>
               <button className="icon-button" type="button" onClick={() => onSelectedClassChange("")} aria-label="关闭每日任务打卡表">
                 <X size={20} />
@@ -4288,7 +4359,7 @@ function TeacherNoteEditor({ task, onSave }: { task: Task; onSave: (task: Task) 
 
     const timer = window.setTimeout(() => {
       void handleSave(note);
-    }, 5000);
+    }, 3000);
 
     return () => window.clearTimeout(timer);
   }, [isSaving, note]);

@@ -185,6 +185,20 @@ function sqliteSchema(db: Database) {
       UNIQUE (dateKey, teacherId, className, columnKey)
     );
 
+    CREATE TABLE IF NOT EXISTS personal_tasks (
+      id TEXT PRIMARY KEY,
+      ownerId TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+    date TEXT NOT NULL,
+    priority TEXT NOT NULL,
+    category TEXT,
+    isPriority INTEGER NOT NULL DEFAULT 0,
+      completed INTEGER NOT NULL DEFAULT 0,
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS dashboard_versions (
       id TEXT PRIMARY KEY,
       marker TEXT NOT NULL,
@@ -199,6 +213,19 @@ function sqliteSchema(db: Database) {
     CREATE INDEX IF NOT EXISTS idx_shared_files_created ON shared_files(createdAt);
     CREATE INDEX IF NOT EXISTS idx_daily_check_entries_date ON daily_check_entries(dateKey);
     CREATE INDEX IF NOT EXISTS idx_daily_check_task_notes_date ON daily_check_task_notes(dateKey);
+    CREATE INDEX IF NOT EXISTS idx_personal_tasks_owner_date ON personal_tasks(ownerId, date);
+    CREATE INDEX IF NOT EXISTS idx_personal_tasks_owner_priority ON personal_tasks(ownerId, priority, completed);
+    CREATE TABLE IF NOT EXISTS personal_test_subtasks (
+      id TEXT PRIMARY KEY,
+      ownerId TEXT NOT NULL,
+      testTaskId TEXT NOT NULL,
+      title TEXT NOT NULL,
+      completed INTEGER NOT NULL DEFAULT 0,
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_personal_test_subtasks_owner_test ON personal_test_subtasks(ownerId, testTaskId);
+    CREATE INDEX IF NOT EXISTS idx_personal_test_subtasks_owner_completed ON personal_test_subtasks(ownerId, completed);
   `);
 }
 
@@ -215,6 +242,8 @@ function sqliteMigrations(db: Database) {
   ensureSqliteColumn(db, "task_files", "fileSize", "INTEGER");
   ensureSqliteColumn(db, "shared_files", "fileData", "TEXT");
   ensureSqliteColumn(db, "shared_files", "fileSize", "INTEGER");
+  ensureSqliteColumn(db, "personal_tasks", "isPriority", "INTEGER NOT NULL DEFAULT 0");
+  ensureSqliteColumn(db, "personal_tasks", "category", "TEXT");
 }
 
 const mysqlStatements = [
@@ -349,6 +378,32 @@ const mysqlStatements = [
     UNIQUE KEY uniq_daily_check_task_note (dateKey, teacherId, className, columnKey),
     INDEX idx_daily_check_task_notes_date (dateKey)
   )`,
+  `CREATE TABLE IF NOT EXISTS personal_tasks (
+    id VARCHAR(80) PRIMARY KEY,
+    ownerId VARCHAR(80) NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    description TEXT NOT NULL,
+    date VARCHAR(20) NOT NULL,
+    priority VARCHAR(20) NOT NULL,
+    category VARCHAR(30) NULL,
+    isPriority TINYINT NOT NULL DEFAULT 0,
+    completed TINYINT NOT NULL DEFAULT 0,
+    createdAt VARCHAR(40) NOT NULL,
+    updatedAt VARCHAR(40) NOT NULL,
+    INDEX idx_personal_tasks_owner_date (ownerId, date),
+    INDEX idx_personal_tasks_owner_priority (ownerId, priority, completed)
+  )`,
+  `CREATE TABLE IF NOT EXISTS personal_test_subtasks (
+    id VARCHAR(80) PRIMARY KEY,
+    ownerId VARCHAR(80) NOT NULL,
+    testTaskId VARCHAR(80) NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    completed TINYINT NOT NULL DEFAULT 0,
+    createdAt VARCHAR(40) NOT NULL,
+    updatedAt VARCHAR(40) NOT NULL,
+    INDEX idx_personal_test_subtasks_owner_test (ownerId, testTaskId),
+    INDEX idx_personal_test_subtasks_owner_completed (ownerId, completed)
+  )`,
   `CREATE TABLE IF NOT EXISTS dashboard_versions (
     id VARCHAR(80) PRIMARY KEY,
     marker VARCHAR(80) NOT NULL,
@@ -373,6 +428,8 @@ async function mysqlMigrations(pool: Pool) {
   await ensureMysqlColumn(pool, "task_files", "fileSize", "BIGINT");
   await ensureMysqlColumn(pool, "shared_files", "fileData", "LONGTEXT");
   await ensureMysqlColumn(pool, "shared_files", "fileSize", "BIGINT");
+  await ensureMysqlColumn(pool, "personal_tasks", "isPriority", "TINYINT NOT NULL DEFAULT 0");
+  await ensureMysqlColumn(pool, "personal_tasks", "category", "VARCHAR(30) NULL");
 }
 
 async function seedIfEmpty(query: (sql: string, params?: RowValue[]) => Promise<unknown[]>, exec: (sql: string, params?: RowValue[]) => Promise<void>) {

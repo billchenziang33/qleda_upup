@@ -127,14 +127,41 @@ interface DailyCheckTaskNoteRow {
   updatedAt: string;
 }
 
+interface PersonalTaskRow {
+  id: string;
+  ownerId: string;
+  title: string;
+  description: string;
+  date: string;
+  priority: Priority;
+  category: PersonalTaskCategory | null;
+  isPriority: number | boolean;
+  completed: number | boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface PersonalTestSubtaskRow {
+  id: string;
+  ownerId: string;
+  testTaskId: string;
+  title: string;
+  completed: number | boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+type PersonalTaskCategory = "class" | "homework" | "test" | "extracurricular";
+
 export const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 const port = Number(process.env.PORT ?? 4000);
 const host = process.env.HOST ?? "0.0.0.0";
 const uploadDirectory = fileURLToPath(new URL("../data/uploads", import.meta.url));
 const exportDirectory = fileURLToPath(new URL("../data/exports", import.meta.url));
-const oldCompletedTaskRetentionDays = 3;
+const oldCompletedTaskRetentionDays = 2;
 const oldCompletedTaskCleanupIntervalMs = 12 * 60 * 60 * 1000;
+const personalWorkspaceOwnerId = "personal_workspace_owner_v1";
 let oldCompletedTaskCleanupAt = 0;
 let oldCompletedTaskCleanupPromise: Promise<void> | null = null;
 
@@ -268,6 +295,56 @@ const dailyCheckTaskNoteSchema = z.object({
   columnKey: z.string().trim().min(1).max(80),
   note: z.string().trim().max(500).default("")
 });
+
+const personalTaskDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).or(z.literal(""));
+const personalTaskMonthQuerySchema = z.object({
+  month: z.string().regex(/^\d{4}-\d{2}$/).optional(),
+  scope: z.enum(["calendar", "priority"]).default("calendar")
+}).superRefine((value, context) => {
+  if (value.scope === "calendar" && !value.month) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["month"], message: "month is required for calendar tasks" });
+  }
+});
+const personalTaskCreateSchema = z.object({
+  title: z.string().trim().min(1).max(255),
+  description: z.string().trim().max(2000).default(""),
+  date: personalTaskDateSchema,
+  priority: z.enum(["high", "medium", "low"]).default("medium"),
+  category: z.enum(["class", "homework", "test", "extracurricular"]).default("homework"),
+  isPriority: z.boolean().default(false)
+}).superRefine((value, context) => {
+  if (!value.isPriority && !value.date) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["date"], message: "calendar tasks require a date" });
+  }
+});
+const personalTaskUpdateSchema = z.object({
+  title: z.string().trim().min(1).max(255).optional(),
+  description: z.string().trim().max(2000).optional(),
+  date: personalTaskDateSchema.optional(),
+  priority: z.enum(["high", "medium", "low"]).optional(),
+  category: z.enum(["class", "homework", "test", "extracurricular"]).optional(),
+  isPriority: z.boolean().optional(),
+  completed: z.boolean().optional()
+});
+const personalTestSubtaskQuerySchema = z.object({ testTaskId: z.string().trim().min(1).max(80) });
+const personalTestSubtaskCreateSchema = z.object({
+  testTaskId: z.string().trim().min(1).max(80),
+  title: z.string().trim().min(1).max(255)
+});
+const personalTestSubtaskUpdateSchema = z.object({
+  title: z.string().trim().min(1).max(255).optional(),
+  completed: z.boolean().optional()
+});
+
+const dailyCheckTaskColumns = [
+  { key: "list", label: "list" },
+  { key: "reading", label: "阅读作业" },
+  { key: "listening", label: "听力作业" },
+  { key: "vocab_cn", label: "答案词（中）" },
+  { key: "vocab_en", label: "答案词（英）" },
+  { key: "speaking", label: "口语（2话题）" },
+  { key: "writing", label: "写作作业" }
+];
 
 const priorityRank: Record<Priority, number> = {
   high: 0,
@@ -429,6 +506,7 @@ async function cleanupOldCompletedTasks() {
   if (oldCompletedTaskCleanupPromise) return oldCompletedTaskCleanupPromise;
   if (startedAt - oldCompletedTaskCleanupAt < oldCompletedTaskCleanupIntervalMs) return;
 
+  let cleanupSucceeded = false;
   oldCompletedTaskCleanupPromise = (async () => {
     const cutoffDate = getOldCompletedTaskCutoffDate();
     const expiredTasks = await all<Pick<TaskRow, "id">>(
@@ -438,15 +516,26 @@ async function cleanupOldCompletedTasks() {
     if (!expiredTasks.length) return;
 
     const taskIds = expiredTasks.map((task) => task.id);
-    const placeholders = taskIds.map(() => "?").join(",");
     const [taskFiles, parentExports] = await Promise.all([
       all<Pick<TaskFileRow, "id" | "taskId" | "url">>(
-        `SELECT id, taskId, url FROM task_files WHERE taskId IN (${placeholders})`,
-        taskIds
+        `SELECT id, taskId, url
+         FROM task_files
+         WHERE taskId IN (
+           SELECT id
+           FROM tasks
+           WHERE status = 'completed' AND dueDate <> '' AND dueDate < ?
+         )`,
+        [cutoffDate]
       ),
       all<{ id: string; taskId: string; imageUrl: string }>(
-        `SELECT id, taskId, imageUrl FROM parent_exports WHERE taskId IN (${placeholders})`,
-        taskIds
+        `SELECT id, taskId, imageUrl
+         FROM parent_exports
+         WHERE taskId IN (
+           SELECT id
+           FROM tasks
+           WHERE status = 'completed' AND dueDate <> '' AND dueDate < ?
+         )`,
+        [cutoffDate]
       )
     ]);
 
@@ -455,10 +544,16 @@ async function cleanupOldCompletedTasks() {
       ...parentExports.map((item) => deleteStoredAppFile(item.imageUrl, "/exports/", exportDirectory))
     ]);
 
-    await run(`DELETE FROM audit_logs WHERE entityType = 'task' AND entityId IN (${placeholders})`, taskIds);
-    await run(`DELETE FROM parent_exports WHERE taskId IN (${placeholders})`, taskIds);
-    await run(`DELETE FROM task_files WHERE taskId IN (${placeholders})`, taskIds);
-    await run(`DELETE FROM tasks WHERE id IN (${placeholders})`, taskIds);
+    const expiredTaskSubquery = `
+      SELECT id
+      FROM tasks
+      WHERE status = 'completed' AND dueDate <> '' AND dueDate < ?
+    `;
+
+    await run(`DELETE FROM audit_logs WHERE entityType = 'task' AND entityId IN (${expiredTaskSubquery})`, [cutoffDate]);
+    await run(`DELETE FROM parent_exports WHERE taskId IN (${expiredTaskSubquery})`, [cutoffDate]);
+    await run(`DELETE FROM task_files WHERE taskId IN (${expiredTaskSubquery})`, [cutoffDate]);
+    await run("DELETE FROM tasks WHERE status = 'completed' AND dueDate <> '' AND dueDate < ?", [cutoffDate]);
 
     await writeAuditLog({
       actor: "system",
@@ -467,12 +562,13 @@ async function cleanupOldCompletedTasks() {
       entityId: `cleanup-before-${cutoffDate}`,
       detail: `Deleted ${taskIds.length} completed tasks older than ${oldCompletedTaskRetentionDays} days and ${taskFiles.length} related files`
     });
+    cleanupSucceeded = true;
   })()
     .catch((error) => {
       console.error("Failed to cleanup old completed tasks", error);
     })
     .finally(() => {
-      oldCompletedTaskCleanupAt = Date.now();
+      if (cleanupSucceeded) oldCompletedTaskCleanupAt = Date.now();
       oldCompletedTaskCleanupPromise = null;
     });
 
@@ -522,6 +618,41 @@ function mapDailyCheckEntry(entry: DailyCheckEntryRow) {
     ...entry,
     checked: Boolean(entry.checked)
   };
+}
+
+function mapPersonalTask(task: PersonalTaskRow) {
+  const { ownerId: _ownerId, ...personalTask } = task;
+  return {
+    ...personalTask,
+    isPriority: Boolean(task.isPriority),
+    completed: Boolean(task.completed)
+  };
+}
+
+function inferPersonalTaskCategory(title: string): PersonalTaskCategory {
+  const normalizedTitle = title.toLowerCase();
+  if (/midterm|quiz|final|test|exam|期中|期末|考试|测验/.test(normalizedTitle)) return "test";
+  if (/varsity|skate|滑冰|吃饭|dinner|appointment|邀约|约饭/.test(normalizedTitle)) return "extracurricular";
+  if (/^[a-z]{2,5}\d{3,4}[a-z]?\d?\b|\b(lec|tut|pra|lab|sem)\b/i.test(title)) return "class";
+  return "homework";
+}
+
+function getPersonalTaskEffectiveCategory(task: Pick<PersonalTaskRow, "title" | "category">): PersonalTaskCategory {
+  return task.category ?? inferPersonalTaskCategory(task.title);
+}
+
+function mapPersonalTestSubtask(subtask: PersonalTestSubtaskRow) {
+  const { ownerId: _ownerId, ...mapped } = subtask;
+  return { ...mapped, completed: Boolean(subtask.completed) };
+}
+
+async function getOwnedTestTask(testTaskId: string) {
+  const task = await get<Pick<PersonalTaskRow, "id" | "ownerId" | "title" | "category" | "isPriority">>(
+    "SELECT id, ownerId, title, category, isPriority FROM personal_tasks WHERE id = ? AND ownerId = ?",
+    [testTaskId, personalWorkspaceOwnerId]
+  );
+  if (!task || Boolean(task.isPriority) || getPersonalTaskEffectiveCategory(task) !== "test") return null;
+  return task;
 }
 
 function sortTasksForTeacher<T extends { pinned: boolean; status: string; priority: string; dueDate: string }>(input: T[]) {
@@ -579,6 +710,149 @@ function stripControlCharacters(value: string | null | undefined) {
   return String(value ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").trim();
 }
 
+function normalizeDailyCheckMatchText(value: string | null | undefined) {
+  return String(value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function isDailyCheckTaskMatch(taskTitle: string, columnKey: string, taskNote: string | null | undefined) {
+  const normalizedTitle = normalizeDailyCheckMatchText(taskTitle);
+  if (!normalizedTitle) return false;
+  const column = dailyCheckTaskColumns.find((item) => item.key === columnKey);
+  return (
+    normalizedTitle === normalizeDailyCheckMatchText(column?.label) ||
+    normalizedTitle === normalizeDailyCheckMatchText(taskNote)
+  );
+}
+
+function getDailyCheckClassName(student: StudentRow) {
+  return student.group.trim() || "未分班";
+}
+
+async function findDailyCheckColumnForTask(task: TaskRow, student: StudentRow) {
+  const dateKey = getDateKey(task.dueDate);
+  if (!dateKey) return null;
+
+  const taskNotes = await all<DailyCheckTaskNoteRow>(
+    "SELECT * FROM daily_check_task_notes WHERE dateKey = ? AND teacherId = ? AND className = ?",
+    [dateKey, student.teacherId, getDailyCheckClassName(student)]
+  );
+  const notesByColumn = new Map(taskNotes.map((note) => [note.columnKey, note.note]));
+  return (
+    dailyCheckTaskColumns.find((column) => isDailyCheckTaskMatch(task.title, column.key, notesByColumn.get(column.key))) ??
+    null
+  );
+}
+
+async function upsertDailyCheckEntryFromTask(task: TaskRow, student: StudentRow, columnKey: string, timestamp = now()) {
+  const dateKey = getDateKey(task.dueDate);
+  if (!dateKey) return;
+
+  const id = createId("dce");
+  const checkedValue = task.status === "completed" ? 1 : 0;
+  const taskNote = String(task.teacherComment ?? "").trim();
+
+  if (databaseType() === "mysql") {
+    await run(
+      `INSERT INTO daily_check_entries (id, dateKey, teacherId, className, studentId, columnKey, checked, note, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE checked = VALUES(checked), note = VALUES(note), updatedAt = VALUES(updatedAt)`,
+      [id, dateKey, student.teacherId, getDailyCheckClassName(student), student.id, columnKey, checkedValue, taskNote, timestamp, timestamp]
+    );
+    return;
+  }
+
+  await run(
+    `INSERT INTO daily_check_entries (id, dateKey, teacherId, className, studentId, columnKey, checked, note, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(dateKey, teacherId, className, studentId, columnKey)
+     DO UPDATE SET checked = excluded.checked,
+                   note = excluded.note,
+                   updatedAt = excluded.updatedAt`,
+    [id, dateKey, student.teacherId, getDailyCheckClassName(student), student.id, columnKey, checkedValue, taskNote, timestamp, timestamp]
+  );
+}
+
+async function syncDailyCheckEntryFromTask(taskId: string, timestamp = now()) {
+  const task = await get<TaskRow>("SELECT * FROM tasks WHERE id = ?", [taskId]);
+  if (!task) return;
+  const student = await get<StudentRow>(
+    `SELECT students.id, students.name, students.grade, students.targetScore, students.currentLevel, students.\`group\` AS \`group\`,
+            students.teacherId, users.name AS teacherName, students.assistantId, students.createdAt, students.updatedAt
+     FROM students
+     LEFT JOIN users ON users.id = students.teacherId
+     WHERE students.id = ?`,
+    [task.studentId]
+  );
+  if (!student) return;
+  const column = await findDailyCheckColumnForTask(task, student);
+  if (!column) return;
+  await upsertDailyCheckEntryFromTask(task, student, column.key, timestamp);
+}
+
+async function syncTaskFromDailyCheckEntry(input: {
+  dateKey: string;
+  teacherId: string;
+  className: string;
+  studentId: string;
+  columnKey: string;
+  checked: boolean;
+  note: string;
+}, timestamp = now()) {
+  const taskNote = await get<DailyCheckTaskNoteRow>(
+    "SELECT * FROM daily_check_task_notes WHERE dateKey = ? AND teacherId = ? AND className = ? AND columnKey = ?",
+    [input.dateKey, input.teacherId, input.className, input.columnKey]
+  );
+  const matchingTasks = await all<TaskRow>(
+    "SELECT * FROM tasks WHERE studentId = ? AND substr(replace(dueDate, '/', '-'), 1, 10) = ? ORDER BY createdAt DESC",
+    [input.studentId, input.dateKey]
+  );
+  const task = matchingTasks.find((item) => isDailyCheckTaskMatch(item.title, input.columnKey, taskNote?.note));
+  if (!task) return;
+
+  const nextStatus: TaskStatus = input.checked || input.note.trim() ? "completed" : "not_started";
+  const nextTeacherComment = input.note.trim();
+  await run("UPDATE tasks SET status = ?, teacherComment = ?, updatedAt = ? WHERE id = ?", [
+    nextStatus,
+    nextTeacherComment,
+    timestamp,
+    task.id
+  ]);
+}
+
+async function syncDailyCheckColumnFromMatchingTasks(input: {
+  dateKey: string;
+  teacherId: string;
+  className: string;
+  columnKey: string;
+  note: string;
+}, timestamp = now()) {
+  const students = await all<StudentRow>(
+    `SELECT students.id, students.name, students.grade, students.targetScore, students.currentLevel, students.\`group\` AS \`group\`,
+            students.teacherId, users.name AS teacherName, students.assistantId, students.createdAt, students.updatedAt
+     FROM students
+     LEFT JOIN users ON users.id = students.teacherId
+     WHERE students.teacherId = ? AND students.\`group\` = ?`,
+    [input.teacherId, input.className]
+  );
+  if (students.length === 0) return;
+
+  const studentById = new Map(students.map((student) => [student.id, student]));
+  const tasks = await all<TaskRow>(
+    `SELECT * FROM tasks
+     WHERE substr(replace(dueDate, '/', '-'), 1, 10) = ?
+       AND studentId IN (${students.map(() => "?").join(", ")})
+     ORDER BY createdAt DESC`,
+    [input.dateKey, ...students.map((student) => student.id)]
+  );
+
+  for (const task of tasks) {
+    if (!isDailyCheckTaskMatch(task.title, input.columnKey, input.note)) continue;
+    const student = studentById.get(task.studentId);
+    if (!student) continue;
+    await upsertDailyCheckEntryFromTask(task, student, input.columnKey, timestamp);
+  }
+}
+
 function pdfSafeText(value: string | null | undefined, fallback = "-") {
   const clean = stripControlCharacters(value);
   if (!clean) return fallback;
@@ -587,8 +861,12 @@ function pdfSafeText(value: string | null | undefined, fallback = "-") {
 
 async function readDashboardVersion() {
   const [users, students, tasks, taskFiles, sharedFiles, printJobs, auditLogs, dailyCheckEntries, dailyCheckTaskNotes] = await Promise.all([
-    get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(createdAt) AS marker FROM users"),
-    get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(updatedAt) AS marker FROM students"),
+    get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(createdAt) AS marker FROM users WHERE role <> 'archived_teacher'"),
+    get<{ count: number; marker: string | null }>(
+      `SELECT COUNT(*) AS count, MAX(students.updatedAt) AS marker
+       FROM students
+       INNER JOIN users ON users.id = students.teacherId AND users.role = 'teacher'`
+    ),
     get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(updatedAt) AS marker FROM tasks"),
     readDashboardVersionMarker().then((marker) => ({ count: 1, marker })),
     get<{ count: number; marker: string | null }>("SELECT COUNT(*) AS count, MAX(createdAt) AS marker FROM shared_files"),
@@ -1110,18 +1388,218 @@ app.get("/api/dashboard/version", async (_req, res, next) => {
   }
 });
 
+app.get("/api/personal-tasks", async (req, res, next) => {
+  try {
+    const { month, scope } = personalTaskMonthQuerySchema.parse(req.query);
+    const where = scope === "priority" ? "isPriority = 1" : "isPriority = 0 AND date LIKE ?";
+    const params = scope === "priority" ? [personalWorkspaceOwnerId] : [personalWorkspaceOwnerId, `${month}%`];
+    const tasks = await all<PersonalTaskRow>(
+      `SELECT id, ownerId, title, description, date, priority, category, isPriority, completed, createdAt, updatedAt
+       FROM personal_tasks
+       WHERE ownerId = ? AND ${where}
+       ORDER BY date ASC, completed ASC, createdAt ASC`,
+      params
+    );
+    res.json(tasks.map(mapPersonalTask));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/personal-tasks", async (req, res, next) => {
+  try {
+    const payload = personalTaskCreateSchema.parse(req.body);
+    const timestamp = now();
+    const id = createId("pt");
+    await run(
+      `INSERT INTO personal_tasks (id, ownerId, title, description, date, priority, category, isPriority, completed, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+      [id, personalWorkspaceOwnerId, payload.title, payload.description, payload.date, payload.priority, payload.category, payload.isPriority ? 1 : 0, timestamp, timestamp]
+    );
+    await touchDashboardVersion(timestamp);
+    const saved = await get<PersonalTaskRow>(
+      "SELECT id, ownerId, title, description, date, priority, category, isPriority, completed, createdAt, updatedAt FROM personal_tasks WHERE id = ? AND ownerId = ?",
+      [id, personalWorkspaceOwnerId]
+    );
+    res.status(201).json(saved ? mapPersonalTask(saved) : null);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/personal-tasks/:taskId", async (req, res, next) => {
+  try {
+    const payload = personalTaskUpdateSchema.parse(req.body);
+    const taskId = String(req.params.taskId);
+    const existing = await get<PersonalTaskRow>(
+      "SELECT id, ownerId, title, description, date, priority, category, isPriority, completed, createdAt, updatedAt FROM personal_tasks WHERE id = ? AND ownerId = ?",
+      [taskId, personalWorkspaceOwnerId]
+    );
+    if (!existing) {
+      res.status(404).json({ message: "Personal task not found" });
+      return;
+    }
+    if (!existing.isPriority && payload.date === "") {
+      res.status(400).json({ message: "Calendar tasks require a date" });
+      return;
+    }
+
+    const timestamp = now();
+    await run(
+      `UPDATE personal_tasks
+       SET title = ?, description = ?, date = ?, priority = ?, category = ?, isPriority = ?, completed = ?, updatedAt = ?
+       WHERE id = ? AND ownerId = ?`,
+      [
+        payload.title ?? existing.title,
+        payload.description ?? existing.description,
+        payload.date ?? existing.date,
+        payload.priority ?? existing.priority,
+        payload.category ?? existing.category,
+        payload.isPriority === undefined ? Number(existing.isPriority) : payload.isPriority ? 1 : 0,
+        payload.completed === undefined ? Number(existing.completed) : payload.completed ? 1 : 0,
+        timestamp,
+        taskId,
+        personalWorkspaceOwnerId
+      ]
+    );
+    await touchDashboardVersion(timestamp);
+    const saved = await get<PersonalTaskRow>(
+      "SELECT id, ownerId, title, description, date, priority, category, isPriority, completed, createdAt, updatedAt FROM personal_tasks WHERE id = ? AND ownerId = ?",
+      [taskId, personalWorkspaceOwnerId]
+    );
+    res.json(saved ? mapPersonalTask(saved) : null);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/personal-test-subtasks", async (req, res, next) => {
+  try {
+    const { testTaskId } = personalTestSubtaskQuerySchema.parse(req.query);
+    if (!await getOwnedTestTask(testTaskId)) {
+      res.status(404).json({ message: "Test task not found" });
+      return;
+    }
+    const subtasks = await all<PersonalTestSubtaskRow>(
+      `SELECT id, ownerId, testTaskId, title, completed, createdAt, updatedAt
+       FROM personal_test_subtasks
+       WHERE ownerId = ? AND testTaskId = ?
+       ORDER BY completed ASC, createdAt ASC`,
+      [personalWorkspaceOwnerId, testTaskId]
+    );
+    res.json(subtasks.map(mapPersonalTestSubtask));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/personal-test-subtasks", async (req, res, next) => {
+  try {
+    const payload = personalTestSubtaskCreateSchema.parse(req.body);
+    if (!await getOwnedTestTask(payload.testTaskId)) {
+      res.status(404).json({ message: "Test task not found" });
+      return;
+    }
+    const timestamp = now();
+    const id = createId("pts");
+    await run(
+      `INSERT INTO personal_test_subtasks (id, ownerId, testTaskId, title, completed, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, 0, ?, ?)`,
+      [id, personalWorkspaceOwnerId, payload.testTaskId, payload.title, timestamp, timestamp]
+    );
+    await touchDashboardVersion(timestamp);
+    const saved = await get<PersonalTestSubtaskRow>(
+      "SELECT id, ownerId, testTaskId, title, completed, createdAt, updatedAt FROM personal_test_subtasks WHERE id = ? AND ownerId = ?",
+      [id, personalWorkspaceOwnerId]
+    );
+    res.status(201).json(saved ? mapPersonalTestSubtask(saved) : null);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/personal-test-subtasks/:subtaskId", async (req, res, next) => {
+  try {
+    const payload = personalTestSubtaskUpdateSchema.parse(req.body);
+    const subtaskId = String(req.params.subtaskId);
+    const existing = await get<PersonalTestSubtaskRow>(
+      "SELECT id, ownerId, testTaskId, title, completed, createdAt, updatedAt FROM personal_test_subtasks WHERE id = ? AND ownerId = ?",
+      [subtaskId, personalWorkspaceOwnerId]
+    );
+    if (!existing || !await getOwnedTestTask(existing.testTaskId)) {
+      res.status(404).json({ message: "Test subtask not found" });
+      return;
+    }
+    const timestamp = now();
+    await run(
+      `UPDATE personal_test_subtasks
+       SET title = ?, completed = ?, updatedAt = ?
+       WHERE id = ? AND ownerId = ?`,
+      [payload.title ?? existing.title, payload.completed === undefined ? Number(existing.completed) : payload.completed ? 1 : 0, timestamp, subtaskId, personalWorkspaceOwnerId]
+    );
+    await touchDashboardVersion(timestamp);
+    const saved = await get<PersonalTestSubtaskRow>(
+      "SELECT id, ownerId, testTaskId, title, completed, createdAt, updatedAt FROM personal_test_subtasks WHERE id = ? AND ownerId = ?",
+      [subtaskId, personalWorkspaceOwnerId]
+    );
+    res.json(saved ? mapPersonalTestSubtask(saved) : null);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/personal-test-subtasks/:subtaskId", async (req, res, next) => {
+  try {
+    const subtaskId = String(req.params.subtaskId);
+    const existing = await get<PersonalTestSubtaskRow>(
+      "SELECT id, ownerId, testTaskId, title, completed, createdAt, updatedAt FROM personal_test_subtasks WHERE id = ? AND ownerId = ?",
+      [subtaskId, personalWorkspaceOwnerId]
+    );
+    if (!existing || !await getOwnedTestTask(existing.testTaskId)) {
+      res.status(404).json({ message: "Test subtask not found" });
+      return;
+    }
+    await run("DELETE FROM personal_test_subtasks WHERE id = ? AND ownerId = ?", [subtaskId, personalWorkspaceOwnerId]);
+    await touchDashboardVersion(now());
+    res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/personal-tasks/:taskId", async (req, res, next) => {
+  try {
+    const taskId = String(req.params.taskId);
+    const existing = await get<Pick<PersonalTaskRow, "id">>(
+      "SELECT id FROM personal_tasks WHERE id = ? AND ownerId = ?",
+      [taskId, personalWorkspaceOwnerId]
+    );
+    if (!existing) {
+      res.status(404).json({ message: "Personal task not found" });
+      return;
+    }
+
+    const timestamp = now();
+    await run("DELETE FROM personal_tasks WHERE id = ? AND ownerId = ?", [taskId, personalWorkspaceOwnerId]);
+    await touchDashboardVersion(timestamp);
+    res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/dashboard", async (_req, res, next) => {
   try {
     await cleanupOldCompletedTasks();
     await markTasksWithTaskEvidenceCompleted();
     const todayDateKey = getShanghaiDateKey();
     const [users, students, tasks, parentExports, printJobs, auditLogs, chatMessages, sharedFiles, dailyCheckEntries, dailyCheckTaskNotes, version] = await Promise.all([
-      all("SELECT * FROM users ORDER BY createdAt ASC"),
+      all("SELECT * FROM users WHERE role <> 'archived_teacher' ORDER BY createdAt ASC"),
       all<StudentRow>(
         `SELECT students.id, students.name, students.grade, students.targetScore, students.currentLevel, students.\`group\` AS \`group\`,
                 students.teacherId, users.name AS teacherName, students.assistantId, students.createdAt, students.updatedAt
          FROM students
-         LEFT JOIN users ON users.id = students.teacherId
+         INNER JOIN users ON users.id = students.teacherId AND users.role = 'teacher'
          ORDER BY students.createdAt ASC`
       ),
       all<TaskRow>("SELECT * FROM tasks ORDER BY createdAt ASC"),
@@ -1136,7 +1614,9 @@ app.get("/api/dashboard", async (_req, res, next) => {
       all<DailyCheckTaskNoteRow>("SELECT * FROM daily_check_task_notes WHERE dateKey = ? ORDER BY updatedAt DESC", [todayDateKey]),
       readDashboardVersion()
     ]);
-    const relevantTaskIds = getDashboardRelevantTaskIds(tasks, 3);
+    const visibleStudentIds = new Set(students.map((student) => student.id));
+    const visibleTasks = tasks.filter((task) => visibleStudentIds.has(task.studentId));
+    const relevantTaskIds = getDashboardRelevantTaskIds(visibleTasks, oldCompletedTaskRetentionDays);
     const taskFiles =
       relevantTaskIds.length > 0
         ? await all<TaskFileRow>(
@@ -1153,12 +1633,12 @@ app.get("/api/dashboard", async (_req, res, next) => {
        WHERE uploaderRole = 'assistant' AND fileType LIKE 'image/%'`
     );
     const tasksWithCorrection = new Set(correctedTaskRows.map((row) => row.taskId));
-    const pendingReviewTasks = tasks.filter((task) => task.status !== "completed" && !tasksWithCorrection.has(task.id));
+    const pendingReviewTasks = visibleTasks.filter((task) => task.status !== "completed" && !tasksWithCorrection.has(task.id));
 
     res.json({
       users,
       students,
-      tasks: sortTasksForTeacher(tasks.map(mapTask)),
+      tasks: sortTasksForTeacher(visibleTasks.map(mapTask)),
       taskFiles: taskFiles.map(mapTaskFile),
       taskFilesLoadedTaskIds: relevantTaskIds,
       tasksWithCorrection: Array.from(tasksWithCorrection),
@@ -1172,7 +1652,7 @@ app.get("/api/dashboard", async (_req, res, next) => {
       version,
       summary: {
         studentCount: students.length,
-        activeTasks: countTasksWithinDays(tasks, 3),
+        activeTasks: countTasksWithinDays(visibleTasks, oldCompletedTaskRetentionDays),
         pendingReview: pendingReviewTasks.length,
         pendingPrintJobs: printJobs.filter((job) => job.status === "pending").length
       }
@@ -1186,7 +1666,7 @@ app.patch("/api/daily-check-entries", async (req, res, next) => {
   try {
     const payload = dailyCheckEntrySchema.parse(req.body);
     const timestamp = now();
-    const checkedValue = payload.checked ? 1 : 0;
+    const checkedValue = payload.checked || payload.note.trim() ? 1 : 0;
     let id = createId("dce");
 
     if (databaseType() === "mysql") {
@@ -1212,6 +1692,7 @@ app.patch("/api/daily-check-entries", async (req, res, next) => {
       [payload.dateKey, payload.teacherId, payload.className, payload.studentId, payload.columnKey]
     );
     if (saved) id = saved.id;
+    await syncTaskFromDailyCheckEntry(payload, timestamp);
     await touchDashboardVersion(timestamp);
     res.json(saved ? mapDailyCheckEntry(saved) : { id, ...payload, createdAt: timestamp, updatedAt: timestamp });
   } catch (error) {
@@ -1248,6 +1729,7 @@ app.patch("/api/daily-check-task-notes", async (req, res, next) => {
       [payload.dateKey, payload.teacherId, payload.className, payload.columnKey]
     );
     if (saved) id = saved.id;
+    await syncDailyCheckColumnFromMatchingTasks(payload, timestamp);
     await touchDashboardVersion(timestamp);
     res.json(saved ?? { id, ...payload, createdAt: timestamp, updatedAt: timestamp });
   } catch (error) {
@@ -1450,7 +1932,7 @@ app.get("/api/students", async (_req, res, next) => {
         `SELECT students.id, students.name, students.grade, students.targetScore, students.currentLevel, students.\`group\` AS \`group\`,
                 students.teacherId, users.name AS teacherName, students.assistantId, students.createdAt, students.updatedAt
          FROM students
-         LEFT JOIN users ON users.id = students.teacherId
+         INNER JOIN users ON users.id = students.teacherId AND users.role = 'teacher'
          ORDER BY students.createdAt ASC`
       )
     );
@@ -1695,16 +2177,14 @@ app.delete("/api/teachers/:teacherId", async (req, res, next) => {
       [teacherId]
     );
 
-    for (const student of students) {
-      await deleteStudentWithTasks(student.id);
-    }
-    await run("DELETE FROM users WHERE id = ? AND role = 'teacher'", [teacherId]);
+    await run("UPDATE users SET role = 'archived_teacher' WHERE id = ? AND role = 'teacher'", [teacherId]);
+    await touchDashboardVersion();
     await writeAuditLog({
       actor: teacherId,
-      action: "teacher_deleted",
+      action: "teacher_archived",
       entityType: "teacher",
       entityId: teacherId,
-      detail: `Deleted teacher ${existing.name} with ${students.length} students`
+      detail: `Archived teacher ${existing.name} with ${students.length} students; student data retained`
     });
 
     res.status(204).send();
@@ -1875,6 +2355,7 @@ app.post("/api/tasks", async (req, res, next) => {
     );
 
     const task = await get<TaskRow>("SELECT * FROM tasks WHERE id = ?", [id]);
+    await syncDailyCheckEntryFromTask(id, timestamp);
     res.status(201).json(mapTask(task));
   } catch (error) {
     next(error);
@@ -1929,6 +2410,7 @@ app.patch("/api/tasks/:taskId", async (req, res, next) => {
       });
     }
 
+    await syncDailyCheckEntryFromTask(taskId);
     const task = await get<TaskRow>("SELECT * FROM tasks WHERE id = ?", [taskId]);
     res.json(mapTask(task));
   } catch (error) {
@@ -2124,7 +2606,9 @@ app.post("/api/tasks/:taskId/files", upload.single("file"), async (req, res, nex
       uploaderRole === "student" ||
       (uploaderRole === "assistant" && fileType.startsWith("image/"))
     ) {
-      await run("UPDATE tasks SET status = 'completed', updatedAt = ? WHERE id = ?", [now(), task.id]);
+      const timestamp = now();
+      await run("UPDATE tasks SET status = 'completed', updatedAt = ? WHERE id = ?", [timestamp, task.id]);
+      await syncDailyCheckEntryFromTask(task.id, timestamp);
     }
 
     const createdFile = await get<TaskFileRow>(
